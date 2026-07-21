@@ -1,0 +1,40 @@
+{
+ "cwd": "/work/aws-cdk/packages/aws-cdk-lib",
+ "counts": {
+  "getSymbolAtLocation": 271017,
+  "getExportsOfModule": 11129,
+  "getAliasedSymbol": 626,
+  "getFullyQualifiedName": 357050,
+  "getTypeAtLocation": 205803,
+  "getBaseTypeOfLiteralType": 3559,
+  "__parseSymbolDocumentation": 148129,
+  "typeToTypeNode": 255847,
+  "getApparentType": 252305,
+  "getTypeFromTypeNode": 16325,
+  "getTypeOfSymbolAtLocation": 85853,
+  "getSignatureFromDeclaration": 15141,
+  "getPropertyOfType": 33214,
+  "getExportSpecifierLocalTargetSymbol": 3379,
+  "getConstantValue": 3408,
+  "getTypeOfSymbol": 4598,
+  "getDeclaredTypeOfSymbol": 196880
+ },
+ "timesMs": {
+  "getSymbolAtLocation": 94.3,
+  "getExportsOfModule": 28.9,
+  "getAliasedSymbol": 0.1,
+  "getFullyQualifiedName": 2169.1,
+  "getTypeAtLocation": 150.8,
+  "getBaseTypeOfLiteralType": 1,
+  "typeToTypeNode": 14973,
+  "getApparentType": 41.5,
+  "getTypeFromTypeNode": 16.3,
+  "getTypeOfSymbolAtLocation": 55.3,
+  "getSignatureFromDeclaration": 11.9,
+  "getPropertyOfType": 28.4,
+  "getExportSpecifierLocalTargetSymbol": 6.8,
+  "getConstantValue": 1.9,
+  "getTypeOfSymbol": 1.8,
+  "getDeclaredTypeOfSymbol": 33.2
+ }
+}

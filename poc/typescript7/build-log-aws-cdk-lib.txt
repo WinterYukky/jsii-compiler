@@ -1,0 +1,30 @@
+tar: Ignoring unknown extended header keyword 'SCHILY.ino'
+tar: Ignoring unknown extended header keyword 'SCHILY.nlink'
+tar: Ignoring unknown extended header keyword 'SCHILY.dev'
+tar: Ignoring unknown extended header keyword 'SCHILY.ino'
+tar: Ignoring unknown extended header keyword 'SCHILY.nlink'
+tar: Ignoring unknown extended header keyword 'SCHILY.dev'
+tar: Ignoring unknown extended header keyword 'SCHILY.ino'
+tar: Ignoring unknown extended header keyword 'SCHILY.nlink'
+tar: Ignoring unknown extended header keyword 'SCHILY.dev'
+tar: Ignoring unknown extended header keyword 'SCHILY.ino'
+tar: Ignoring unknown extended header keyword 'SCHILY.nlink'
+Generating 292 modules...
+Summary:
+  Services:     292
+  Files:        663
+  Resources:    1659
+🐢  Completed in: 6.937s
+
+✨ Successful
+Errors: 0 | Warnings: 0 (+1017 silenced) | Time: 146.86s
+All export targets exist.
+All peer dependencies satisfied
+Build times for aws-cdk-lib: Total time (4m58.4s) | /work/aws-cdk/node_modules/jsii/bin/jsii (2m27.5s) | /work/aws-cdk/node_modules/eslint/bin/eslint.js (1m18.6s) | ts-node ./scripts/verify-imports-resolve-same.ts && ts-node ./scripts/verify-imports-shielded.ts && ts-node ./scripts/verify-exports-exist.ts && ts-node ./cx-api/build-tools/flag-report.ts && check-peer-dependencies . && env QUIET=1 lazify . (43.8s) | /work/aws-cdk/tools/@aws-cdk/cdk-build-tools/bin/cdk-awslint (18.7s) | gen-cdk (8.1s) | ts-node region-info/build-tools/generate-static-data.ts && (rm -rf core/test/fs/fixtures && cd core/test/fs && tar -xzf fixtures.tar.gz) && (rm -rf assets/test/fs/fixtures && cd assets/test/fs && tar -xzf fixtures.tar.gz) && ./scripts/airlift-custom-resource-handlers.sh (1.3s) | '/usr/bin/node' (0.2s) | pkglint (0.2s)
+[2K[1GDone in 298.55s.
+
+
+
+ Lerna (powered by Nx)   Successfully ran target build for 10 projects
+
+
