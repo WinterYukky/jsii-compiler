@@ -61,3 +61,11 @@ this._typeChecker = (() => {
 - jsii checker usage on `aws-cdk-lib`: ~1.72M calls, only ~17.6s spent inside the checker.
 - Synthetic walk RPC tax: ~18µs/call transport overhead, unbatched.
 - TS7 API gaps found: `getFullyQualifiedName` (jsii's most-called API) and emit-time `CustomTransformers`.
+
+## Full-monorepo shootout (added 2026-07-21, c7i.8xlarge)
+
+- `compile-bench-monorepo.csv` — per-package `tsc -p --noEmit` vs `tsgo -p --noEmit` timings
+  across all 63 buildable aws-cdk packages (after a full baseline build).
+- Totals: tsc 424.7s vs tsgo 56.8s (**7.5x**); 61/63 clean on both.
+- Full build with lint (current toolchain, concurrency=10): wall clock 10m08s; per-tool breakdown
+  (from "Build times for ..." log lines): jsii 68%, eslint 25%, awslint 2%, plain tsc 2%, other 3%.
