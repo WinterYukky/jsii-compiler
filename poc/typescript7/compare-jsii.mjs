@@ -5,7 +5,7 @@ import * as fs from 'node:fs';
 const ref = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const gen = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
 
-const report = { matchedTypes: 0, missingTypes: [], extraTypes: [], memberDiffs: [], fieldDiffs: [] };
+const report = { matchedTypes: 0, missingTypes: [], extraTypes: [], memberDiffs: [], fieldDiffs: [], membersTotal: 0, membersMatched: 0 };
 
 const refTypes = ref.types ?? {};
 const genTypes = gen.types ?? {};
@@ -44,11 +44,13 @@ function diffMembers(fqn, kind, refList = [], genList = []) {
   const refMap = new Map(refList.map((m) => [m.name, m]));
   const genMap = new Map(genList.map((m) => [m.name, m]));
   for (const [name, rm] of refMap) {
+    report.membersTotal++;
     const gm = genMap.get(name);
     if (!gm) { report.memberDiffs.push(`${fqn} ${kind} ${name}: MISSING in generated`); continue; }
     const a = JSON.stringify(canon(normMember(rm)));
     const b = JSON.stringify(canon(normMember(gm)));
     if (a !== b) report.memberDiffs.push(`${fqn} ${kind} ${name}: DIFFER\n  ref: ${a}\n  gen: ${b}`);
+    else report.membersMatched++;
   }
   for (const name of genMap.keys()) {
     if (!refMap.has(name)) report.memberDiffs.push(`${fqn} ${kind} ${name}: EXTRA in generated`);
@@ -79,11 +81,13 @@ for (const [fqn, rt] of Object.entries(refTypes)) {
   }
 }
 
+const MAX = Number(process.env.MAX_DIFFS ?? 30);
 console.log(`=== compare summary ===`);
 console.log(`types: ref=${Object.keys(refTypes).length} gen=${Object.keys(genTypes).length} matched=${report.matchedTypes}`);
-console.log(`missing: ${report.missingTypes.length} ${JSON.stringify(report.missingTypes)}`);
-console.log(`extra:   ${report.extraTypes.length} ${JSON.stringify(report.extraTypes)}`);
+console.log(`missing: ${report.missingTypes.length} ${JSON.stringify(report.missingTypes.slice(0, 20))}`);
+console.log(`extra:   ${report.extraTypes.length} ${JSON.stringify(report.extraTypes.slice(0, 20))}`);
+console.log(`members: ${report.membersMatched}/${report.membersTotal} identical (${(report.membersMatched / Math.max(1, report.membersTotal) * 100).toFixed(1)}%)`);
 console.log(`field diffs: ${report.fieldDiffs.length}`);
-for (const d of report.fieldDiffs) console.log(`  - ${d}`);
+for (const d of report.fieldDiffs.slice(0, MAX)) console.log(`  - ${d}`);
 console.log(`member diffs: ${report.memberDiffs.length}`);
-for (const d of report.memberDiffs) console.log(`  - ${d}`);
+for (const d of report.memberDiffs.slice(0, MAX)) console.log(`  - ${d}`);

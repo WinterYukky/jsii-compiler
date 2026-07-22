@@ -31,6 +31,7 @@ const moduleExports = checker.getExportsOfModule(moduleSymbol);
 
 const types = {};
 const typeFqnBySymbolId = new Map();
+const submodules = {};
 
 function resolveAlias(sym) {
   let s = sym;
@@ -38,17 +39,49 @@ function resolveAlias(sym) {
   return s;
 }
 
+// external dependency assemblies (e.g. constructs): name -> Set(exported type names)
+const externalDeps = new Map();
+for (const dep of Object.keys({ ...(pkg.dependencies ?? {}), ...(pkg.peerDependencies ?? {}) })) {
+  try {
+    const depJsii = JSON.parse(fs.readFileSync(path.join(root, 'node_modules', dep, '.jsii'), 'utf8'));
+    externalDeps.set(dep, new Set(Object.keys(depJsii.types ?? {}).map((f) => f.slice(depJsii.name.length + 1))));
+  } catch { /* not a jsii dep */ }
+}
+const bundled = new Set(pkg.bundledDependencies ?? pkg.bundleDependencies ?? []);
+
+function externalFqnOf(sym) {
+  const decl0 = sym.declarations?.[0];
+  if (!decl0) return undefined;
+  const file = decl0.path ?? '';
+  const m = /node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(file);
+  if (!m) return undefined;
+  const dep = m[1];
+  if (!externalDeps.has(dep)) return undefined;
+  if (externalDeps.get(dep).has(sym.name)) return `${dep}.${sym.name}`;
+  return undefined;
+}
+
 const exported = [];
-for (const e of moduleExports) {
-  const sym = resolveAlias(e);
-  const decl = sym.declarations?.[0]?.resolve(project);
-  if (!decl) continue;
-  if ([SyntaxKind.ClassDeclaration, SyntaxKind.InterfaceDeclaration, SyntaxKind.EnumDeclaration].includes(decl.kind)) {
-    const fqn = `${assemblyName}.${e.name}`;
-    typeFqnBySymbolId.set(sym.id, fqn);
-    exported.push({ name: e.name, sym, decl, fqn });
+const seenTypeSymbols = new Set();
+function collectModuleExports(mExports, prefix) {
+  for (const e of mExports) {
+    const sym = resolveAlias(e);
+    const decl = sym.declarations?.[0]?.resolve(project);
+    if (!decl) continue;
+    if ([SyntaxKind.ClassDeclaration, SyntaxKind.InterfaceDeclaration, SyntaxKind.EnumDeclaration].includes(decl.kind)) {
+      if (seenTypeSymbols.has(sym.id)) continue;
+      seenTypeSymbols.add(sym.id);
+      const fqn = `${prefix}.${e.name}`;
+      typeFqnBySymbolId.set(sym.id, fqn);
+      exported.push({ name: e.name, sym, decl, fqn });
+    } else if (decl.kind === SyntaxKind.SourceFile || (sym.flags & SymbolFlags.ValueModule) !== 0 || (sym.flags & SymbolFlags.NamespaceModule) !== 0) {
+      const subFqn = `${prefix}.${e.name}`;
+      if (prefix === assemblyName) submodules[subFqn] = {};
+      collectModuleExports(checker.getExportsOfModule(sym), subFqn);
+    }
   }
 }
+collectModuleExports(moduleExports, assemblyName);
 
 const defaultStability = pkg.stability;
 function docsOf(sym) {
@@ -102,7 +135,9 @@ function typeRefOf(type, optionalOut, typeNode) {
   const f = type.flags;
   if (f & TypeFlags.EnumLike) {
     const s = type.getSymbol();
-    const fqn = s && (typeFqnBySymbolId.get(s.id) ?? (s.getParent() && typeFqnBySymbolId.get(s.getParent().id)));
+    const parent = s?.getParent();
+    const fqn = s && (typeFqnBySymbolId.get(s.id) ?? externalFqnOf(s)
+      ?? (parent && (typeFqnBySymbolId.get(parent.id) ?? externalFqnOf(parent))));
     if (fqn) return { fqn };
   }
   if (f & TypeFlags.NonPrimitive) return { primitive: 'json' };
@@ -151,7 +186,7 @@ function typeRefOf(type, optionalOut, typeNode) {
   if (sym) {
     const target = type.isTypeReference() ? type.getTarget() : type;
     const tsym = target.getSymbol() ?? sym;
-    const fqn = typeFqnBySymbolId.get(tsym.id);
+    const fqn = typeFqnBySymbolId.get(tsym.id) ?? externalFqnOf(tsym);
     if (fqn) return { fqn };
   }
   const indexInfos = checker.getIndexInfosOfType(type);
@@ -235,7 +270,8 @@ function membersOfClassLike(sym, decl, jsiiType, isInterface) {
     if (pDecl.parent !== decl) {
       if (!isInterface) continue; // own members only for classes
       const parentType = checker.getTypeAtLocation(pDecl.parent);
-      const pfqn = typeFqnBySymbolId.get(parentType.getSymbol()?.id);
+      const psym2 = parentType.getSymbol();
+      const pfqn = psym2 && (typeFqnBySymbolId.get(psym2.id) ?? externalFqnOf(psym2));
       if (pfqn) continue; // exported base: members come via `interfaces`; unexported base: hoist (erased base)
     }
     if ((p.flags & SymbolFlags.Method) !== 0) {
@@ -285,7 +321,7 @@ for (const { name, sym, decl, fqn } of exported) {
     jsiiType.kind = 'interface';
     const type = checker.getTypeAtLocation(decl);
     const bases = (type.getBaseTypes() ?? [])
-      .map((b) => typeFqnBySymbolId.get(b.getSymbol()?.id))
+      .map((b) => { const s = b.getSymbol(); return s && (typeFqnBySymbolId.get(s.id) ?? externalFqnOf(s)); })
       .filter(Boolean);
     if (bases.length) jsiiType.interfaces = bases;
     membersOfClassLike(sym, decl, jsiiType, true);
@@ -301,7 +337,7 @@ for (const { name, sym, decl, fqn } of exported) {
       for (const t of h.types) {
         const hSym0 = checker.getSymbolAtLocation(t.expression);
         const hSym = hSym0 ? resolveAlias(hSym0) : undefined;
-        const fqnRef = hSym ? typeFqnBySymbolId.get(hSym.id) : undefined;
+        const fqnRef = hSym ? (typeFqnBySymbolId.get(hSym.id) ?? externalFqnOf(hSym)) : undefined;
         if (!fqnRef) continue;
         if (isExtends) jsiiType.base = fqnRef;
         else (jsiiType.interfaces ??= []).push(fqnRef);
@@ -333,8 +369,16 @@ for (const { name, sym, decl, fqn } of exported) {
 
 const t2 = performance.now();
 
+const dependencies = {};
+for (const [dep] of externalDeps) {
+  const v = (pkg.dependencies ?? {})[dep] ?? (pkg.peerDependencies ?? {})[dep];
+  if (v) dependencies[dep] = v;
+}
+
 const assembly = {
   author: pkg.author ?? {},
+  ...(Object.keys(dependencies).length ? { dependencies } : {}),
+  ...(Object.keys(submodules).length ? { submodules } : {}),
   description: pkg.description ?? assemblyName,
   homepage: pkg.homepage,
   jsiiVersion: 'assembler-lite-proto (TS7)',
