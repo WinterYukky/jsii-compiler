@@ -69,3 +69,13 @@ this._typeChecker = (() => {
 - Totals: tsc 424.7s vs tsgo 56.8s (**7.5x**); 61/63 clean on both.
 - Full build with lint (current toolchain, concurrency=10): wall clock 10m08s; per-tool breakdown
   (from "Build times for ..." log lines): jsii 68%, eslint 25%, awslint 2%, plain tsc 2%, other 3%.
+
+## assembler-lite prototype (added 2026-07-22)
+
+`assembler-lite.mjs` is a minimal jsii Assembler reimplemented on the TS7 API (requires a tsgo build
+with `getFullyQualifiedName` — see microsoft/typescript-go#4700). It produces a `.jsii`-style
+assembly. `compare-jsii.mjs` structurally diffs it against a reference `.jsii`.
+
+Result on the real `constructs` package (12 types): **structurally identical output**
+(0 missing/extra types, 0 field diffs, 0 member diffs — docs/stability/optional/variadic/heritage/
+enums/symbolId all match), assembling in ~0.05s vs ~1.0s for the real jsii on the same machine.
