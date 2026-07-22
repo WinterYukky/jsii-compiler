@@ -167,7 +167,8 @@ function docsOf(sym) {
     docs.summary = summary.replace(/\s+/g, ' ').trim().replace(/(?<![.!?])$/, '.');
   }
   for (const tag of sym.getJsDocTags(checker)) {
-    const text = typeof tag.text === 'string' ? tag.text : (tag.text ?? []).map((p) => p.text).join('');
+    let text = typeof tag.text === 'string' ? tag.text : (tag.text ?? []).map((p) => p.text).join('');
+    text = text.replace(/\{@link\s+([^}]*?)\s*\}/g, '{@link $1 }');
     if (tag.name === 'default') docs.default = text.trim();
     else if (tag.name === 'deprecated') { docs.deprecated = text.trim(); docs.stability = 'deprecated'; }
     else if (tag.name === 'stability') docs.stability = text.trim();
@@ -262,6 +263,7 @@ function typeRefOf(type, optionalOut, typeNode) {
     return { collection: { elementtype: typeRefOf(args[0]), kind: 'array' } };
   }
   const sym = type.getSymbol();
+  if (sym && sym.name === 'Date' && (sym.declarations?.[0]?.path ?? '').includes('/lib.')) return { primitive: 'date' };
   if (sym) {
     const target = type.isTypeReference() ? type.getTarget() : type;
     const tsym = target.getSymbol() ?? sym;
@@ -347,12 +349,12 @@ function membersOfClassLike(sym, decl, jsiiType, isInterface) {
     const pDecl = p.declarations?.[0]?.resolve(project);
     if (!pDecl) continue;
     if ((pDecl.modifiers ?? []).some((x) => x.kind === SyntaxKind.PrivateKeyword)) continue;
-    if (pDecl.parent !== decl) {
-      if (!isInterface) continue; // own members only for classes
-      const parentType = checker.getTypeAtLocation(pDecl.parent);
-      const psym2 = parentType.getSymbol();
-      const pfqn = psym2 && (typeFqnBySymbolId.get(psym2.id) ?? externalFqnOf(psym2));
-      if (pfqn) continue; // exported base: members come via `interfaces`; unexported base: hoist (erased base)
+    const isParamProp = pDecl.kind === SyntaxKind.Parameter;
+    const owner = isParamProp ? pDecl.parent?.parent : pDecl.parent;
+    if (owner !== decl) {
+      const ownerSym = owner?.name ? checker.getSymbolAtLocation(owner.name) : undefined;
+      const pfqn = ownerSym && (typeFqnBySymbolId.get(ownerSym.id) ?? externalFqnOf(ownerSym));
+      if (pfqn) continue; // declared on an exported/foreign base: not re-listed
     }
     if ((p.flags & SymbolFlags.Method) !== 0) {
       const m = methodOf(p, pDecl, false);
@@ -409,23 +411,48 @@ for (const { name, sym, decl, fqn } of exported) {
       .filter(Boolean);
     if (bases.length) jsiiType.interfaces = bases;
     membersOfClassLike(sym, decl, jsiiType, true);
-    if (!jsiiType.methods && !/^I[A-Z]/.test(name) && (jsiiType.properties ?? []).every((p) => p.immutable)) {
-      jsiiType.datatype = true;
+    {
+      const allProps = checker.getPropertiesOfType(type).filter((p) => !isInternal(p));
+      const hasMethod = allProps.some((p) => (p.flags & SymbolFlags.Method) !== 0);
+      const allReadonly = allProps.every((p) => {
+        const d0 = p.declarations?.[0]?.resolve(project);
+        if (!d0) return true;
+        return (d0.modifiers ?? []).some((x) => x.kind === SyntaxKind.ReadonlyKeyword) || d0.kind === SyntaxKind.GetAccessor;
+      });
+      if (!hasMethod && allReadonly && !/^I[A-Z][a-z]/.test(name)) jsiiType.datatype = true;
     }
   } else {
     jsiiType.kind = 'class';
     const mods = decl.modifiers ?? [];
     if (mods.some((x) => x.kind === SyntaxKind.AbstractKeyword)) jsiiType.abstract = true;
-    for (const h of decl.heritageClauses ?? []) {
-      const isExtends = h.token === SyntaxKind.ExtendsKeyword;
-      for (const t of h.types) {
-        const hSym0 = checker.getSymbolAtLocation(t.expression);
-        const hSym = hSym0 ? resolveAlias(hSym0) : undefined;
-        const fqnRef = hSym ? (typeFqnBySymbolId.get(hSym.id) ?? externalFqnOf(hSym)) : undefined;
-        if (!fqnRef) continue;
-        if (isExtends) jsiiType.base = fqnRef;
-        else (jsiiType.interfaces ??= []).push(fqnRef);
-      }
+    {
+      const out = { base: undefined, interfaces: new Set() };
+      const collectHeritage = (classDecl) => {
+        for (const h of classDecl.heritageClauses ?? []) {
+          const isExt = h.token === SyntaxKind.ExtendsKeyword;
+          for (const t of h.types) {
+            const s0 = checker.getSymbolAtLocation(t.expression);
+            const s = s0 ? resolveAlias(s0) : undefined;
+            if (!s) continue;
+            const fqnRef = typeFqnBySymbolId.get(s.id) ?? externalFqnOf(s);
+            if (isExt) {
+              if (fqnRef) { out.base ??= fqnRef; }
+              else {
+                const d0 = s.declarations?.[0]?.resolve(project);
+                if (d0 && (d0.kind === SyntaxKind.ClassDeclaration || d0.kind === SyntaxKind.InterfaceDeclaration)) collectHeritage(d0);
+              }
+            } else if (fqnRef) {
+              out.interfaces.add(fqnRef);
+            } else {
+              const d0 = s.declarations?.[0]?.resolve(project);
+              if (d0 && d0.kind === SyntaxKind.InterfaceDeclaration) collectHeritage(d0);
+            }
+          }
+        }
+      };
+      collectHeritage(decl);
+      if (out.base) jsiiType.base = out.base;
+      if (out.interfaces.size) jsiiType.interfaces = [...out.interfaces];
     }
     const ctor = decl.members?.find((m) => m.kind === SyntaxKind.Constructor);
     const ctorPrivate = ctor && (ctor.modifiers ?? []).some((x) => x.kind === SyntaxKind.PrivateKeyword);

@@ -102,3 +102,23 @@ cascading. Result on **aws-cdk-lib** (vs the real jsii 5.9.44 output, same tree)
 - members: **98,980 / 100,378 identical (98.6%)**
 - wall clock: **~33s** (load 0.8s + assemble ~32s, unbatched naive walk, 1.25GB RSS)
   vs **2m38s** for the real jsii on the same machine (c7i.4xlarge)
+
+## Final results (2026-07-22)
+
+Fidelity of assembler-lite vs the real jsii 5.9.44 (structural diff, union order normalized):
+
+| package | types matched | members identical | assembler-lite | real jsii |
+|---|---|---|---:|---:|
+| constructs (12 types) | 12/12 | **100%** (0 diffs) | ~0.05s | ~1.0s |
+| @aws-cdk/cloud-assembly-schema (59) | 59/59 | **100%** (0 diffs) | ~0.13s | ~1.3s |
+| **aws-cdk-lib (20,744)** | **20,743/20,744** | **99.7%** (100,106/100,378), 25 residual field diffs | **~39s** | **2m38s** |
+
+Additional jsii behaviors reproduced for aws-cdk-lib: class-merged nested types, submodule FQN
+attribution by declaration path, vendored-vs-peer dependency distinction, strip-deprecated
+allowlists, per-type stability cascade, constructor parameter properties, erased base class
+chain climbing (base + interfaces hoisting), the `/^I[A-Z][a-z]/` behavioral-interface rule,
+`Date`->date / `object`->json primitives, compressed assembly reading, and `{@link X }` spacing.
+
+`emit-demo.sh` demonstrates the emit-gap workaround: tsgo CLI emit + a Node post-processing pass
+injecting `[Symbol.for('jsii.rtti')]`. Verification loads both outputs and compares the runtime
+type info: **identical for all classes (constructs, 0 mismatches)**.
