@@ -91,3 +91,14 @@ elision, and symbolId derivation via the new `getFullyQualifiedName` API.
 Original note on the first `constructs` run: **structurally identical output**
 (0 missing/extra types, 0 field diffs, 0 member diffs — docs/stability/optional/variadic/heritage/
 enums/symbolId all match), assembling in ~0.05s vs ~1.0s for the real jsii on the same machine.
+
+## aws-cdk-lib run (added 2026-07-22)
+
+assembler-lite now handles submodules (incl. class-merged nested types and vendored submodules),
+peer-dependency (external assembly) references, strip-deprecated allowlists, and per-type stability
+cascading. Result on **aws-cdk-lib** (vs the real jsii 5.9.44 output, same tree):
+
+- types: **20,743 / 20,744 matched** (1 missing re-export edge case), 0 extra
+- members: **98,980 / 100,378 identical (98.6%)**
+- wall clock: **~33s** (load 0.8s + assemble ~32s, unbatched naive walk, 1.25GB RSS)
+  vs **2m38s** for the real jsii on the same machine (c7i.4xlarge)

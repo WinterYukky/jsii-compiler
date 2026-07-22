@@ -6,6 +6,7 @@
 //        NP_LIB    — path to the built native-preview package dir
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createRequire } from 'node:module';
 
 const NP = process.env.NP_LIB ?? '/work-ts/_packages/native-preview';
 const { API, SymbolFlags, TypeFlags } = await import(path.join(NP, 'dist/api/sync/api.js'));
@@ -41,13 +42,34 @@ function resolveAlias(sym) {
 
 // external dependency assemblies (e.g. constructs): name -> Set(exported type names)
 const externalDeps = new Map();
-for (const dep of Object.keys({ ...(pkg.dependencies ?? {}), ...(pkg.peerDependencies ?? {}) })) {
+for (const dep of Object.keys(pkg.peerDependencies ?? {})) {
   try {
-    const depJsii = JSON.parse(fs.readFileSync(path.join(root, 'node_modules', dep, '.jsii'), 'utf8'));
+    const req = createRequire(path.join(root, 'package.json'));
+    const depDir = path.dirname(req.resolve(`${dep}/package.json`));
+    let raw = fs.readFileSync(path.join(depDir, '.jsii'), 'utf8');
+    let depJsii = JSON.parse(raw);
+    if (depJsii.schema === 'jsii/file-redirect') {
+      const zlib = await import('node:zlib');
+      depJsii = JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(depDir, depJsii.filename))).toString('utf8'));
+    }
     externalDeps.set(dep, new Set(Object.keys(depJsii.types ?? {}).map((f) => f.slice(depJsii.name.length + 1))));
   } catch { /* not a jsii dep */ }
 }
 const bundled = new Set(pkg.bundledDependencies ?? pkg.bundleDependencies ?? []);
+const stripDeprecated = !!(pkg['cdk-build']?.stripDeprecated);
+let stripAllowList; // undefined = strip all deprecated; Set = strip only listed FQNs
+if (process.env.STRIP_ALLOWLIST && fs.existsSync(process.env.STRIP_ALLOWLIST)) {
+  stripAllowList = new Set(fs.readFileSync(process.env.STRIP_ALLOWLIST, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean));
+}
+
+function isDeprecated(sym) {
+  return sym.getJsDocTags(checker).some((t) => t.name === 'deprecated');
+}
+function shouldStrip(sym, fqn) {
+  if (!stripDeprecated || !isDeprecated(sym)) return false;
+  if (!stripAllowList) return true;
+  return stripAllowList.has(fqn);
+}
 
 function externalFqnOf(sym) {
   const decl0 = sym.declarations?.[0];
@@ -62,36 +84,86 @@ function externalFqnOf(sym) {
 }
 
 const exported = [];
-const seenTypeSymbols = new Set();
-function collectModuleExports(mExports, prefix) {
+const candidates = new Map(); // symId -> [{name, prefix, moduleDir, sym}]
+const visitedModules = new Set();
+function collectModuleExports(mExports, prefix, moduleDir) {
   for (const e of mExports) {
     const sym = resolveAlias(e);
-    const decl = sym.declarations?.[0]?.resolve(project);
-    if (!decl) continue;
-    if ([SyntaxKind.ClassDeclaration, SyntaxKind.InterfaceDeclaration, SyntaxKind.EnumDeclaration].includes(decl.kind)) {
-      if (seenTypeSymbols.has(sym.id)) continue;
-      seenTypeSymbols.add(sym.id);
-      const fqn = `${prefix}.${e.name}`;
-      typeFqnBySymbolId.set(sym.id, fqn);
-      exported.push({ name: e.name, sym, decl, fqn });
-    } else if (decl.kind === SyntaxKind.SourceFile || (sym.flags & SymbolFlags.ValueModule) !== 0 || (sym.flags & SymbolFlags.NamespaceModule) !== 0) {
+    const declH = sym.declarations?.[0];
+    if (!declH) continue;
+    const kind = declH.kind;
+    if ([SyntaxKind.ClassDeclaration, SyntaxKind.InterfaceDeclaration, SyntaxKind.EnumDeclaration].includes(kind)) {
+      const nm = /node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(declH.path ?? '');
+      if (nm && externalDeps.has(nm[1])) continue; // peer-dependency type: referenced externally, not owned
+      if (!candidates.has(sym.id)) candidates.set(sym.id, []);
+      candidates.get(sym.id).push({ name: e.name, prefix, moduleDir, sym });
+    } else if (kind === SyntaxKind.SourceFile || (sym.flags & SymbolFlags.ValueModule) !== 0 || (sym.flags & SymbolFlags.NamespaceModule) !== 0) {
       const subFqn = `${prefix}.${e.name}`;
+      const key = `${sym.id}:${subFqn}`;
+      if (visitedModules.has(key)) continue;
+      visitedModules.add(key);
       if (prefix === assemblyName) submodules[subFqn] = {};
-      collectModuleExports(checker.getExportsOfModule(sym), subFqn);
+      const subDir = path.dirname(sym.declarations?.[0]?.path ?? moduleDir);
+      collectModuleExports(checker.getExportsOfModule(sym), subFqn, subDir);
     }
   }
 }
-collectModuleExports(moduleExports, assemblyName);
+collectModuleExports(moduleExports, assemblyName, path.dirname(entry));
+
+function registerType(sym, name, fqn) {
+  if (typeFqnBySymbolId.has(sym.id)) return;
+  if (isInternal(sym) || shouldStrip(sym, fqn)) return;
+  const decl = sym.declarations?.[0]?.resolve(project);
+  if (!decl) return;
+  typeFqnBySymbolId.set(sym.id, fqn);
+  exported.push({ name, sym, decl, fqn });
+  const nested = sym.getExports?.();
+  if (nested && nested.size) {
+    for (const [, nsym0] of nested) {
+      const nsym = resolveAlias(nsym0);
+      const nDeclH = nsym.declarations?.[0];
+      if (!nDeclH) continue;
+      if ([SyntaxKind.ClassDeclaration, SyntaxKind.InterfaceDeclaration, SyntaxKind.EnumDeclaration].includes(nDeclH.kind)) {
+        registerType(nsym, nsym.name, `${fqn}.${nsym.name}`);
+      }
+    }
+  }
+}
+for (const [, cands] of candidates) {
+  let best = cands[0];
+  let bestLen = -1;
+  for (const c of cands) {
+    const declPath = c.sym.declarations?.[0]?.path ?? '';
+    const dir = c.moduleDir.endsWith('/') ? c.moduleDir : c.moduleDir + '/';
+    const len = declPath.startsWith(dir) ? dir.length : -1;
+    if (len > bestLen) { bestLen = len; best = c; }
+  }
+  registerType(best.sym, best.name, `${best.prefix}.${best.name}`);
+}
 
 const defaultStability = pkg.stability;
+let currentStability = defaultStability;
 function docsOf(sym) {
   const summaryRaw = sym.getDocumentationComment(checker);
   const docs = {};
   if (summaryRaw) {
     const text = summaryRaw.trim();
-    const m = /^([\s\S]*?\.)\s+([\s\S]+)$/.exec(text);
-    const summary = m ? m[1] : text;
-    if (m) docs.remarks = m[2].trim();
+    let splitAt = -1;
+    let paren = 0; let tick = false;
+    for (let i = 0; i < text.length - 1; i++) {
+      const ch = text[i];
+      if (ch === '`') tick = !tick;
+      else if (!tick && (ch === '(' || ch === '[')) paren++;
+      else if (!tick && (ch === ')' || ch === ']')) paren = Math.max(0, paren - 1);
+      else if (ch === '.' && !tick && paren === 0 && /\s/.test(text[i + 1])) {
+        const before = text.slice(Math.max(0, i - 3), i).toLowerCase();
+        if (before.endsWith('e.g') || before.endsWith('i.e') || before.endsWith('etc')) continue;
+        splitAt = i; break;
+      }
+    }
+    const summary = splitAt >= 0 ? text.slice(0, splitAt + 1) : text;
+    const rest = splitAt >= 0 ? text.slice(splitAt + 1).trim() : '';
+    if (rest) docs.remarks = rest;
     docs.summary = summary.replace(/\s+/g, ' ').trim().replace(/(?<![.!?])$/, '.');
   }
   for (const tag of sym.getJsDocTags(checker)) {
@@ -110,7 +182,14 @@ function symbolIdOf(sym) {
   const tsFqn = checker.getFullyQualifiedName(sym); // e.g. "/abs/path/src/construct".Construct
   const m = /^"([^"]+)"(?:\.(.*))?$/.exec(tsFqn);
   if (!m) return undefined;
-  const rel = path.relative(root, m[1]);
+  let rel;
+  const nm = m[1].lastIndexOf('node_modules/');
+  if (nm >= 0) {
+    const after = m[1].slice(nm + 'node_modules/'.length);
+    rel = after.split('/').slice(after.startsWith('@') ? 2 : 1).join('/');
+  } else {
+    rel = path.relative(root, m[1]);
+  }
   return `${rel}:${m[2] ?? ''}`;
 }
 
@@ -215,9 +294,9 @@ function locOf(decl) {
 }
 
 function withDefaultDocs(obj) {
-  if (!defaultStability) return obj;
-  if (!obj.docs) obj.docs = { stability: defaultStability };
-  else if (!obj.docs.stability) obj.docs.stability = defaultStability;
+  if (!currentStability) return obj;
+  if (!obj.docs) obj.docs = { stability: currentStability };
+  else if (!obj.docs.stability) obj.docs.stability = currentStability;
   return obj;
 }
 
@@ -264,6 +343,7 @@ function membersOfClassLike(sym, decl, jsiiType, isInterface) {
   const methods = [];
   for (const p of checker.getPropertiesOfType(type)) {
     if (isInternal(p)) continue;
+    if (shouldStrip(p, `${jsiiType.fqn}#${p.name}`)) continue;
     const pDecl = p.declarations?.[0]?.resolve(project);
     if (!pDecl) continue;
     if ((pDecl.modifiers ?? []).some((x) => x.kind === SyntaxKind.PrivateKeyword)) continue;
@@ -288,6 +368,7 @@ function membersOfClassLike(sym, decl, jsiiType, isInterface) {
     const staticType = checker.getTypeOfSymbol(sym);
     for (const sp of (staticType ? checker.getPropertiesOfType(staticType) : [])) {
       if (sp.name === 'prototype' || isInternal(sp)) continue;
+      if (shouldStrip(sp, `${jsiiType.fqn}#${sp.name}`)) continue;
       const spDecl = sp.declarations?.[0]?.resolve(project);
       if (!spDecl || spDecl.parent !== decl) continue;
       if ((spDecl.modifiers ?? []).some((x) => x.kind === SyntaxKind.PrivateKeyword)) continue;
@@ -303,6 +384,7 @@ for (const { name, sym, decl, fqn } of exported) {
   const jsiiType = { assembly: assemblyName, fqn, kind: '', locationInModule: locOf(decl), name };
   const d = docsOf(sym);
   if (d) jsiiType.docs = d;
+  currentStability = d?.stability ?? defaultStability;
   withDefaultDocs(jsiiType);
   const symbolId = symbolIdOf(sym);
   if (symbolId) jsiiType.symbolId = symbolId;
@@ -311,6 +393,8 @@ for (const { name, sym, decl, fqn } of exported) {
     jsiiType.kind = 'enum';
     const members = [];
     for (const [, msym] of sym.getExports()) {
+      if (msym.declarations?.[0]?.kind !== SyntaxKind.EnumMember) continue;
+      if (isInternal(msym) || shouldStrip(msym, `${fqn}#${msym.name}`)) continue;
       const member = { name: msym.name };
       const md = docsOf(msym);
       if (md) member.docs = md;
