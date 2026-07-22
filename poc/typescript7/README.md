@@ -76,6 +76,18 @@ this._typeChecker = (() => {
 with `getFullyQualifiedName` — see microsoft/typescript-go#4700). It produces a `.jsii`-style
 assembly. `compare-jsii.mjs` structurally diffs it against a reference `.jsii`.
 
-Result on the real `constructs` package (12 types): **structurally identical output**
+Results (structural diff vs the real jsii output, union member order normalized):
+
+| package | types | result | assembler-lite | real jsii |
+|---|---:|---|---:|---:|
+| `constructs` | 12 | **identical** (0 diffs) | ~0.05s | ~1.0s |
+| `@aws-cdk/cloud-assembly-schema` | 59 | **identical** (0 diffs) | ~0.13s | ~1.3s |
+
+Features exercised: docs (summary/remarks/stability/default/deprecated), optional/variadic/immutable/
+abstract/static/protected, heritage (extends/implements), erased-base member hoisting, type-alias union
+resolution in declaration order with flattening, enums, `object`->json mapping, private-constructor
+elision, and symbolId derivation via the new `getFullyQualifiedName` API.
+
+Original note on the first `constructs` run: **structurally identical output**
 (0 missing/extra types, 0 field diffs, 0 member diffs — docs/stability/optional/variadic/heritage/
 enums/symbolId all match), assembling in ~0.05s vs ~1.0s for the real jsii on the same machine.

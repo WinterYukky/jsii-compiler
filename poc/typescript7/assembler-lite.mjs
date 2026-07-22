@@ -85,7 +85,19 @@ function isInternal(sym) {
   return sym.getJsDocTags(checker).some((t) => t.name === 'internal') || sym.name.startsWith('_');
 }
 
-function typeRefOf(type, optionalOut) {
+function unionNodeOf(typeNode) {
+  if (!typeNode) return undefined;
+  if (typeNode.kind === SyntaxKind.UnionType) return typeNode;
+  if (typeNode.kind === SyntaxKind.TypeReference) {
+    const s0 = checker.getSymbolAtLocation(typeNode.typeName);
+    const s = s0 ? resolveAlias(s0) : undefined;
+    const d = s?.declarations?.[0]?.resolve(project);
+    if (d?.kind === SyntaxKind.TypeAliasDeclaration && d.type?.kind === SyntaxKind.UnionType) return d.type;
+  }
+  return undefined;
+}
+
+function typeRefOf(type, optionalOut, typeNode) {
   if (!type) return { primitive: 'any' };
   const f = type.flags;
   if (f & TypeFlags.EnumLike) {
@@ -103,6 +115,24 @@ function typeRefOf(type, optionalOut) {
     const all = type.getTypes();
     const parts = all.filter((t) => !(t.flags & (TypeFlags.Undefined | TypeFlags.Null)));
     if (optionalOut && parts.length !== all.length) optionalOut.optional = true;
+    const un = unionNodeOf(typeNode);
+    if (un) {
+      const refs = [];
+      const seen = new Set();
+      const pushFlat = (r) => {
+        if (!r) return;
+        if (r.union) { r.union.types.forEach(pushFlat); return; }
+        const key = JSON.stringify(r);
+        if (!seen.has(key)) { seen.add(key); refs.push(r); }
+      };
+      for (const tn of un.types) {
+        const tt = checker.getTypeFromTypeNode(tn);
+        if (tt && (tt.flags & (TypeFlags.Undefined | TypeFlags.Null))) { if (optionalOut) optionalOut.optional = true; continue; }
+        pushFlat(typeRefOf(tt, optionalOut, tn));
+      }
+      if (refs.length === 1) return refs[0];
+      if (refs.length > 1) return { union: { types: refs } };
+    }
     const refs = [];
     const seen = new Set();
     for (const p of parts) {
@@ -126,7 +156,7 @@ function typeRefOf(type, optionalOut) {
   }
   const indexInfos = checker.getIndexInfosOfType(type);
   if (indexInfos.length) {
-    return { collection: { elementtype: typeRefOf(indexInfos[0].type), kind: 'map' } };
+    return { collection: { elementtype: typeRefOf(indexInfos[0].valueType), kind: 'map' } };
   }
   return { primitive: 'any' };
 }
@@ -135,7 +165,7 @@ function paramOf(prm) {
   const decl = prm.declarations?.[0]?.resolve(project);
   const t = decl ? checker.getTypeOfSymbolAtLocation(prm, decl) : undefined;
   const opt = {};
-  const p = { name: prm.name, type: typeRefOf(t, opt) };
+  const p = { name: prm.name, type: typeRefOf(t, opt, decl?.type) };
   if (decl?.dotDotDotToken) { p.variadic = true; p.type = p.type?.collection?.elementtype ?? p.type; }
   else if (decl?.questionToken != null || decl?.initializer != null || opt.optional) p.optional = true;
   const d = docsOf(prm);
@@ -168,7 +198,7 @@ function methodOf(msym, decl, isStatic) {
     if (params.length) m.parameters = params;
     if (params.some((p) => p.variadic)) m.variadic = true;
     const opt = {};
-    const ret = typeRefOf(checker.getReturnTypeOfSignature(sig), opt);
+    const ret = typeRefOf(checker.getReturnTypeOfSignature(sig), opt, decl.type);
     if (ret) m.returns = opt.optional ? { optional: true, type: ret } : { type: ret };
   }
   const d = docsOf(msym);
@@ -179,7 +209,7 @@ function methodOf(msym, decl, isStatic) {
 function propOf(psym, decl, isStatic) {
   const t = checker.getTypeOfSymbolAtLocation(psym, decl);
   const opt = {};
-  const p = { locationInModule: locOf(decl), name: psym.name, type: typeRefOf(t, opt) };
+  const p = { locationInModule: locOf(decl), name: psym.name, type: typeRefOf(t, opt, decl.type) };
   const mods = decl.modifiers ?? [];
   const hasSetter = psym.declarations?.some((h) => h.kind === SyntaxKind.SetAccessor);
   if (mods.some((x) => x.kind === SyntaxKind.ReadonlyKeyword) || (decl.kind === SyntaxKind.GetAccessor && !hasSetter)) p.immutable = true;
@@ -202,8 +232,12 @@ function membersOfClassLike(sym, decl, jsiiType, isInterface) {
     const pDecl = p.declarations?.[0]?.resolve(project);
     if (!pDecl) continue;
     if ((pDecl.modifiers ?? []).some((x) => x.kind === SyntaxKind.PrivateKeyword)) continue;
-    if (!isInterface && pDecl.parent !== decl) continue; // own members only for classes
-    if (isInterface && pDecl.parent !== decl) continue;  // jsii lists inherited iface members via `interfaces`
+    if (pDecl.parent !== decl) {
+      if (!isInterface) continue; // own members only for classes
+      const parentType = checker.getTypeAtLocation(pDecl.parent);
+      const pfqn = typeFqnBySymbolId.get(parentType.getSymbol()?.id);
+      if (pfqn) continue; // exported base: members come via `interfaces`; unexported base: hoist (erased base)
+    }
     if ((p.flags & SymbolFlags.Method) !== 0) {
       const m = methodOf(p, pDecl, false);
       if (isInterface) m.abstract = true;
@@ -255,7 +289,7 @@ for (const { name, sym, decl, fqn } of exported) {
       .filter(Boolean);
     if (bases.length) jsiiType.interfaces = bases;
     membersOfClassLike(sym, decl, jsiiType, true);
-    if (!jsiiType.methods && !name.startsWith('I') && (jsiiType.properties ?? []).every((p) => p.immutable)) {
+    if (!jsiiType.methods && !/^I[A-Z]/.test(name) && (jsiiType.properties ?? []).every((p) => p.immutable)) {
       jsiiType.datatype = true;
     }
   } else {
@@ -274,7 +308,10 @@ for (const { name, sym, decl, fqn } of exported) {
       }
     }
     const ctor = decl.members?.find((m) => m.kind === SyntaxKind.Constructor);
-    if (ctor) {
+    const ctorPrivate = ctor && (ctor.modifiers ?? []).some((x) => x.kind === SyntaxKind.PrivateKeyword);
+    if (ctorPrivate) {
+      // private constructor: jsii omits the initializer
+    } else if (ctor) {
       const sig = checker.getSignatureFromDeclaration(ctor);
       const initializer = { locationInModule: locOf(ctor) };
       if (sig) {

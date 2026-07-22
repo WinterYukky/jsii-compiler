@@ -15,6 +15,11 @@ for (const fqn of Object.keys(genTypes)) if (!refTypes[fqn]) report.extraTypes.p
 
 function canon(x) {
   if (Array.isArray(x)) return x.map(canon);
+  if (x && typeof x === 'object' && x.union && Array.isArray(x.union.types)) {
+    // union member order is semantically insignificant; normalize for comparison
+    const types = x.union.types.map(canon).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    return { ...Object.fromEntries(Object.entries(x).filter(([k]) => k !== 'union').map(([k, v]) => [k, canon(v)])), union: { types } };
+  }
   if (x && typeof x === 'object') {
     const o = {};
     for (const k of Object.keys(x).sort()) o[k] = canon(x[k]);
