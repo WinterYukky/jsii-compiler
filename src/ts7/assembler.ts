@@ -605,23 +605,15 @@ export class Ts7Assembler {
     const props: any[] = [];
     const methods: any[] = [];
 
-    // A member is "owned here" (must be listed on this type) if it is declared
-    // directly on this declaration OR on one of the erased base declarations
-    // (private/internal/unexported bases that jsii folds into this type). Members
-    // declared on a *named* (referenced) base interface are NOT re-listed — they
-    // come in via the `interfaces` reference. We resolve erased-base declaration
-    // nodes from the erased base *types* so the comparison is by node identity.
-    const erasedDecls = new Set<any>();
+    // Symbol ids of the erased (private/internal/unexported) bases whose members
+    // jsii folds into this type: members from those bases must be re-listed here.
+    const erasedBaseSymIds = new Set<unknown>();
     for (const eb of erasedBases) {
       const s = eb.getSymbol?.() ?? eb.symbol;
-      for (const d of s?.declarations ?? []) {
-        const rd = d?.resolve ? d.resolve(this.project) : d;
-        if (rd) {
-          erasedDecls.add(rd);
-        }
+      if (s?.id != null) {
+        erasedBaseSymIds.add(s.id);
       }
     }
-    const ownedHere = (owner: any): boolean => owner != null && erasedDecls.has(owner);
 
     for (const p of this.checker.getPropertiesOfType(type)) {
       if (this._isInternal(p)) {
@@ -639,8 +631,17 @@ export class Ts7Assembler {
       }
       const isParamProp = pDecl.kind === SyntaxKind.Parameter;
       const owner = isParamProp ? pDecl.parent?.parent : pDecl.parent;
-      if (owner !== decl && !ownedHere(owner)) {
-        continue; // declared on a named (referenced) base: not re-listed
+      if (owner !== decl) {
+        const ownerSym = owner?.name ? this.checker.getSymbolAtLocation(owner.name) : undefined;
+        // A member declared on another type is re-listed here only when that type
+        // is an erased base (private/internal/unexported); if it is a named base
+        // (has its own FQN, referenced via interfaces/base) it is NOT re-listed.
+        const ownerId = ownerSym?.id;
+        const isErasedBase = ownerId != null && erasedBaseSymIds.has(ownerId);
+        const pfqn = ownerSym && (this.typeFqnBySymbolId.get(ownerSym.id) ?? this._externalFqnOf(ownerSym));
+        if (pfqn && !isErasedBase) {
+          continue; // declared on an exported/foreign named base: not re-listed
+        }
       }
       if ((p.flags & SymbolFlags.Method) !== 0) {
         const m = this._visitMethod(p, pDecl, false);
