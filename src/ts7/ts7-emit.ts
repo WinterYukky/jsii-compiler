@@ -38,8 +38,10 @@ export interface Ts7EmitPipelineResult {
 const RTTI_SYMBOL = 'jsii.rtti';
 
 /**
- * Emit JS/d.ts for the whole project in a SINGLE `getEmitOutput()` call, writing
- * the results to disk and injecting jsii rtti into the emitted `.js` files.
+ * Emit JS/d.ts for the whole project in a SINGLE `getEmitOutput({ writeToDisk })`
+ * call. The server writes every output file directly to disk and returns only
+ * file names, so the ~345MB emit payload never crosses the RPC channel; jsii then
+ * reads back only the class-bearing `.js` files to append the jsii rtti marker.
  *
  * NOTE (perf/stability): emitting per-source-file (calling `getEmitOutput(sf)`
  * once per file) issues one RPC round-trip per file and, at aws-cdk-lib scale
@@ -87,31 +89,35 @@ export function runTs7EmitPipeline(
 
   const emittedFiles: string[] = [];
 
-  // Single whole-project emit (no target source file).
-  const emitOutput = program.getEmitOutput();
+  // Whole-project emit. With writeToDisk, the server writes every output (.js,
+  // .d.ts, .js.map, .d.ts.map, ...) directly to the program's file system and
+  // returns only the file names — avoiding transfer of the entire emit payload
+  // (~345MB on aws-cdk-lib) over the RPC channel. jsii then reads back ONLY the
+  // class-bearing .js files to append the jsii rtti marker.
+  const emitOutput = (program.getEmitOutput as (opts?: any) => any)({ writeToDisk: true });
   if (!emitOutput || !emitOutput.outputFiles) {
     return { emittedFiles };
   }
 
   for (const out of emitOutput.outputFiles) {
     const outPath = path.resolve(root, out.name);
-    let text: string = out.text;
-
-    if (/\.js$/.test(out.name)) {
-      const jsRel = normalizeRel(path.relative(root, outPath));
-      let classesHere = classesByJsRel.get(jsRel);
-      if (!classesHere) {
-        // fallback for simple layouts where the rel-path transform didn't line up
-        classesHere = classesByJsBasename.get(path.basename(out.name));
-      }
-      if (classesHere && classesHere.length) {
-        text += rttiSnippet(classesHere, assembly.version);
-      }
-    }
-
-    fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    fs.writeFileSync(outPath, text, { encoding: 'utf8' });
     emittedFiles.push(outPath);
+
+    if (!/\.js$/.test(out.name)) {
+      continue; // non-JS (d.ts / maps): already written by the server, nothing to do
+    }
+    const jsRel = normalizeRel(path.relative(root, outPath));
+    let classesHere = classesByJsRel.get(jsRel);
+    if (!classesHere) {
+      classesHere = classesByJsBasename.get(path.basename(out.name));
+    }
+    if (!classesHere || !classesHere.length) {
+      continue; // JS without exported classes: no rtti to inject, leave as written
+    }
+    // Read the server-written JS, append the rtti snippet, write it back. Only a
+    // small fraction of files (those declaring exported classes) are touched.
+    const onDisk = fs.readFileSync(outPath, 'utf8');
+    fs.writeFileSync(outPath, onDisk + rttiSnippet(classesHere, assembly.version), { encoding: 'utf8' });
   }
 
   return { emittedFiles };
