@@ -275,6 +275,22 @@ export class Ts7Assembler {
     }
   }
 
+  /** Prefetch docs + declared types for a signature's parameters (one or two RPCs instead of ~3 per param). */
+  private _prefetchParams(prms: any[]): void {
+    if (!prms || prms.length === 0) {
+      return;
+    }
+    this._prefetchDocs(prms);
+    const pairs: Array<{ symbol: any; location: any }> = [];
+    for (const prm of prms) {
+      const decl = prm.declarations?.[0]?.resolve(this.project);
+      if (decl) {
+        pairs.push({ symbol: prm, location: decl });
+      }
+    }
+    this._prefetchMemberTypes(pairs);
+  }
+
   private _shouldStrip(sym: any, fqn: string): boolean {
     if (!this.stripDeprecated || !this._isDeprecated(sym)) {
       return false;
@@ -657,7 +673,9 @@ export class Ts7Assembler {
       const sig = this.checker.getSignatureFromDeclaration(effectiveCtor);
       const initializer: any = { locationInModule: this._locationOf(effectiveCtor) };
       if (sig) {
-        const params = sig.getParameters().map((p: any) => this._visitParameter(p));
+        const prms = sig.getParameters();
+        this._prefetchParams(prms);
+        const params = prms.map((p: any) => this._visitParameter(p));
         if (params.length) {
           initializer.parameters = params;
         }
@@ -748,8 +766,23 @@ export class Ts7Assembler {
     const staticPropsForPrefetch = staticTypeForPrefetch ? this.checker.getPropertiesOfType(staticTypeForPrefetch) : [];
     // One RPC for all member docs of this type (instance + static).
     this._prefetchDocs([...instanceProps, ...staticPropsForPrefetch]);
+    {
+      // One RPC for all member declared types of this type (instance + static
+      // non-method members; methods go through signatures instead).
+      const { SymbolFlags: SF } = this.np;
+      const typePairs: Array<{ symbol: any; location: any }> = [];
+      for (const m of [...instanceProps, ...staticPropsForPrefetch]) {
+        if ((m.flags & SF.Method) !== 0 || m.name === 'prototype') {
+          continue;
+        }
+        const d = m.declarations?.[0]?.resolve(this.project);
+        if (d) {
+          typePairs.push({ symbol: m, location: d });
+        }
+      }
+      this._prefetchMemberTypes(typePairs);
+    }
 
-    const survivors: Array<{ p: any; pDecl: any; isMethod: boolean }> = [];
     for (const p of instanceProps) {
       if (this._isInternal(p)) {
         continue;
@@ -781,18 +814,7 @@ export class Ts7Assembler {
           continue; // declared on an exported/foreign named base: not re-listed
         }
       }
-      survivors.push({ p, pDecl, isMethod: (p.flags & SymbolFlags.Method) !== 0 });
-    }
-
-    // One RPC for the declared types of exactly the surviving non-method members
-    // (Phase 2E: prefetching pre-filter members regressed badly — the filters
-    // above run ONCE and the prefetch covers precisely what pass 2 visits).
-    this._prefetchMemberTypes(
-      survivors.filter((s0) => !s0.isMethod).map((s0) => ({ symbol: s0.p, location: s0.pDecl })),
-    );
-
-    for (const { p, pDecl, isMethod } of survivors) {
-      if (isMethod) {
+      if ((p.flags & SymbolFlags.Method) !== 0) {
         const m = this._visitMethod(p, pDecl, false);
         if (isInterface) {
           m.abstract = true;
@@ -808,7 +830,6 @@ export class Ts7Assembler {
     }
 
     if (!isInterface) {
-      const staticSurvivors: Array<{ sp: any; spDecl: any; isMethod: boolean }> = [];
       for (const sp of staticPropsForPrefetch) {
         if (sp.name === 'prototype' || this._isInternal(sp)) {
           continue;
@@ -823,13 +844,7 @@ export class Ts7Assembler {
         if ((spDecl.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.PrivateKeyword)) {
           continue;
         }
-        staticSurvivors.push({ sp, spDecl, isMethod: (sp.flags & SymbolFlags.Method) !== 0 });
-      }
-      this._prefetchMemberTypes(
-        staticSurvivors.filter((s0) => !s0.isMethod).map((s0) => ({ symbol: s0.sp, location: s0.spDecl })),
-      );
-      for (const { sp, spDecl, isMethod } of staticSurvivors) {
-        if (isMethod) {
+        if ((sp.flags & SymbolFlags.Method) !== 0) {
           methods.push(this._visitMethod(sp, spDecl, true));
         } else {
           props.push(this._visitProperty(sp, spDecl, true));
@@ -860,7 +875,9 @@ export class Ts7Assembler {
       m.protected = true;
     }
     if (sig) {
-      const params = sig.getParameters().map((p: any) => this._visitParameter(p));
+      const prms = sig.getParameters();
+      this._prefetchParams(prms);
+      const params = prms.map((p: any) => this._visitParameter(p));
       if (params.length) {
         m.parameters = params;
       }
