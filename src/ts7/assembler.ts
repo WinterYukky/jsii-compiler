@@ -258,6 +258,39 @@ export class Ts7Assembler {
     }
   }
 
+  /**
+   * Batch-warm the client's input-keyed type cache for many (symbol, location)
+   * pairs in one RPC (getTypeOfSymbolAtLocations, Phase 2E). Subsequent
+   * individual getTypeOfSymbolAtLocation calls for the same pairs are then
+   * client-side hits, so behaviour is unchanged — only round-trips drop.
+   * No-ops when the toolchain lacks the batched endpoint.
+   */
+  private _prefetchMemberTypes(pairs: Array<{ symbol: any; location: any }>): void {
+    if (typeof this.checker.getTypeOfSymbolAtLocations !== 'function' || pairs.length === 0) {
+      return;
+    }
+    const CHUNK = 1000;
+    for (let i = 0; i < pairs.length; i += CHUNK) {
+      this.checker.getTypeOfSymbolAtLocations(pairs.slice(i, i + CHUNK));
+    }
+  }
+
+  /** Prefetch docs + declared types for a signature's parameters (one or two RPCs instead of ~3 per param). */
+  private _prefetchParams(prms: any[]): void {
+    if (!prms || prms.length === 0) {
+      return;
+    }
+    this._prefetchDocs(prms);
+    const pairs: Array<{ symbol: any; location: any }> = [];
+    for (const prm of prms) {
+      const decl = prm.declarations?.[0]?.resolve(this.project);
+      if (decl) {
+        pairs.push({ symbol: prm, location: decl });
+      }
+    }
+    this._prefetchMemberTypes(pairs);
+  }
+
   private _shouldStrip(sym: any, fqn: string): boolean {
     if (!this.stripDeprecated || !this._isDeprecated(sym)) {
       return false;
@@ -640,7 +673,9 @@ export class Ts7Assembler {
       const sig = this.checker.getSignatureFromDeclaration(effectiveCtor);
       const initializer: any = { locationInModule: this._locationOf(effectiveCtor) };
       if (sig) {
-        const params = sig.getParameters().map((p: any) => this._visitParameter(p));
+        const prms = sig.getParameters();
+        this._prefetchParams(prms);
+        const params = prms.map((p: any) => this._visitParameter(p));
         if (params.length) {
           initializer.parameters = params;
         }
@@ -731,6 +766,22 @@ export class Ts7Assembler {
     const staticPropsForPrefetch = staticTypeForPrefetch ? this.checker.getPropertiesOfType(staticTypeForPrefetch) : [];
     // One RPC for all member docs of this type (instance + static).
     this._prefetchDocs([...instanceProps, ...staticPropsForPrefetch]);
+    {
+      // One RPC for all member declared types of this type (instance + static
+      // non-method members; methods go through signatures instead).
+      const { SymbolFlags: SF } = this.np;
+      const typePairs: Array<{ symbol: any; location: any }> = [];
+      for (const m of [...instanceProps, ...staticPropsForPrefetch]) {
+        if ((m.flags & SF.Method) !== 0 || m.name === 'prototype') {
+          continue;
+        }
+        const d = m.declarations?.[0]?.resolve(this.project);
+        if (d) {
+          typePairs.push({ symbol: m, location: d });
+        }
+      }
+      this._prefetchMemberTypes(typePairs);
+    }
 
     for (const p of instanceProps) {
       if (this._isInternal(p)) {
@@ -824,7 +875,9 @@ export class Ts7Assembler {
       m.protected = true;
     }
     if (sig) {
-      const params = sig.getParameters().map((p: any) => this._visitParameter(p));
+      const prms = sig.getParameters();
+      this._prefetchParams(prms);
+      const params = prms.map((p: any) => this._visitParameter(p));
       if (params.length) {
         m.parameters = params;
       }
