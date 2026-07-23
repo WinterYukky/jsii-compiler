@@ -771,10 +771,17 @@ export class Ts7Assembler {
       p.optional = true;
     }
     // Parameter docs come from the owner signature's `@param <name> <desc>` tags,
-    // not from the parameter symbol's own comment.
-    const summary = paramDocs?.get(prm.name);
-    if (summary) {
-      p.docs = { ...(p.docs ?? {}), summary };
+    // not from the parameter symbol's own comment. Fall back to the parameter
+    // symbol's own doc comment. Normalize the summary the same way as other docs
+    // (collapse whitespace, ensure a terminal period).
+    const rawSummary = paramDocs?.get(prm.name);
+    if (rawSummary) {
+      p.docs = { ...(p.docs ?? {}), summary: this._normalizeSummary(rawSummary) };
+    } else {
+      const d = this._visitDocumentation(prm);
+      if (d) {
+        p.docs = d;
+      }
     }
     return p;
   }
@@ -1068,11 +1075,16 @@ export class Ts7Assembler {
     }
     const summaryRaw = splitAt >= 0 ? text.slice(0, splitAt + 1) : text;
     const rest = splitAt >= 0 ? text.slice(splitAt + 1).trim() : '';
-    const summary = summaryRaw
+    const summary = this._normalizeSummary(summaryRaw);
+    return { summary, remarks: rest || undefined };
+  }
+
+  /** Collapse whitespace, trim, and ensure a terminal period (jsii summary form). */
+  private _normalizeSummary(text: string): string {
+    return text
       .replace(/\s+/g, ' ')
       .trim()
       .replace(/(?<![.!?])$/, '.');
-    return { summary, remarks: rest || undefined };
   }
 
   private _withDefaultDocs(obj: any): any {
