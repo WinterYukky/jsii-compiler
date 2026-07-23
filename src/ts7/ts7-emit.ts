@@ -24,6 +24,10 @@ import { Ts7Project } from './ts7-host';
 export interface Ts7EmitPipelineOptions {
   readonly projectRoot: string;
   readonly assembly: spec.Assembly;
+  /** tsc `outDir` from the jsii config (for mapping source -> emitted js path). */
+  readonly outDir?: string;
+  /** tsc `rootDir` from the jsii config. */
+  readonly rootDir?: string;
 }
 
 export interface Ts7EmitPipelineResult {
@@ -34,8 +38,16 @@ export interface Ts7EmitPipelineResult {
 const RTTI_SYMBOL = 'jsii.rtti';
 
 /**
- * Emit JS/d.ts for every local source file via `getEmitOutput`, writing the
- * results to disk and injecting jsii rtti into the emitted `.js` files.
+ * Emit JS/d.ts for the whole project in a SINGLE `getEmitOutput()` call, writing
+ * the results to disk and injecting jsii rtti into the emitted `.js` files.
+ *
+ * NOTE (perf/stability): emitting per-source-file (calling `getEmitOutput(sf)`
+ * once per file) issues one RPC round-trip per file and, at aws-cdk-lib scale
+ * (~thousands of files), destabilizes the out-of-process tsgo session (observed
+ * EPIPE / process exit). The API supports a whole-project emit when called with
+ * no target file (Go side emits in parallel and collects under a mutex), which
+ * collapses this to one RPC. This is also a useful design data point for the
+ * upstream API. See PHASE1-RESULTS.md.
  */
 export function runTs7EmitPipeline(
   project: Ts7Project,
@@ -45,66 +57,84 @@ export function runTs7EmitPipeline(
   const root = options.projectRoot;
   const assembly = options.assembly;
 
-  // Map the emitted `.js` basename (e.g. "construct.js") -> exported classes to
-  // stamp with rtti. We key by the emitted JS filename rather than the source
-  // path to avoid any source-path normalization mismatches between the assembly's
-  // `locationInModule.filename` and the program's source file names.
+  // Map the emitted `.js` path (relative to root, normalized) -> classes to stamp
+  // with rtti. Derive the emitted path from each class's source `locationInModule`
+  // via the tsc outDir/rootDir transform, so it is robust to duplicate basenames
+  // across modules (common at aws-cdk-lib scale). We also index by basename as a
+  // fallback for simple layouts.
+  const classesByJsRel = new Map<string, Array<{ name: string; fqn: string }>>();
   const classesByJsBasename = new Map<string, Array<{ name: string; fqn: string }>>();
   for (const [fqn, type] of Object.entries(assembly.types ?? {})) {
     if ((type as any).kind !== spec.TypeKind.Class) {
       continue;
     }
-    const rel: string | undefined = (type as any).locationInModule?.filename;
-    if (!rel) {
+    const relSrc: string | undefined = (type as any).locationInModule?.filename;
+    if (!relSrc) {
       continue;
     }
-    // e.g. "src/construct.ts" -> "construct.js"
-    const jsBasename = path.basename(rel).replace(/\.tsx?$/, '.js');
-    if (!classesByJsBasename.has(jsBasename)) {
-      classesByJsBasename.set(jsBasename, []);
+    const entry = { name: (type as any).name, fqn };
+    const jsRel = sourceRelToJsRel(relSrc, options.outDir, options.rootDir);
+    if (!classesByJsRel.has(jsRel)) {
+      classesByJsRel.set(jsRel, []);
     }
-    classesByJsBasename.get(jsBasename)!.push({ name: (type as any).name, fqn });
+    classesByJsRel.get(jsRel)!.push(entry);
+    const base = path.basename(jsRel);
+    if (!classesByJsBasename.has(base)) {
+      classesByJsBasename.set(base, []);
+    }
+    classesByJsBasename.get(base)!.push(entry);
   }
 
   const emittedFiles: string[] = [];
 
-  // The TS7 program handle exposes getSourceFileNames() (not getSourceFiles()).
-  const sourceFileNames: string[] = program.getSourceFileNames();
-  for (const fileName of sourceFileNames) {
-    // Only emit local, non-declaration source files.
-    if (!fileName.startsWith(root) || fileName.includes('node_modules') || /\.d\.ts$/.test(fileName)) {
-      continue;
-    }
+  // Single whole-project emit (no target source file).
+  const emitOutput = program.getEmitOutput();
+  if (!emitOutput || !emitOutput.outputFiles) {
+    return { emittedFiles };
+  }
 
-    const sf = program.getSourceFile(fileName);
-    if (!sf) {
-      continue;
-    }
+  for (const out of emitOutput.outputFiles) {
+    const outPath = path.resolve(root, out.name);
+    let text: string = out.text;
 
-    const emitOutput = program.getEmitOutput(sf);
-    if (!emitOutput || !emitOutput.outputFiles) {
-      continue;
-    }
-
-    for (const out of emitOutput.outputFiles) {
-      let text: string = out.text;
-
-      // Inject rtti into the JS output for classes emitted into this file.
-      if (/\.js$/.test(out.name)) {
-        const classesHere = classesByJsBasename.get(path.basename(out.name));
-        if (classesHere && classesHere.length) {
-          text += rttiSnippet(classesHere, assembly.version);
-        }
+    if (/\.js$/.test(out.name)) {
+      const jsRel = normalizeRel(path.relative(root, outPath));
+      let classesHere = classesByJsRel.get(jsRel);
+      if (!classesHere) {
+        // fallback for simple layouts where the rel-path transform didn't line up
+        classesHere = classesByJsBasename.get(path.basename(out.name));
       }
-
-      const outPath = path.resolve(root, out.name);
-      fs.mkdirSync(path.dirname(outPath), { recursive: true });
-      fs.writeFileSync(outPath, text, { encoding: 'utf8' });
-      emittedFiles.push(outPath);
+      if (classesHere && classesHere.length) {
+        text += rttiSnippet(classesHere, assembly.version);
+      }
     }
+
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, text, { encoding: 'utf8' });
+    emittedFiles.push(outPath);
   }
 
   return { emittedFiles };
+}
+
+/** Normalize a relative path for use as a map key (posix separators). */
+function normalizeRel(p: string): string {
+  return p.split(path.sep).join('/');
+}
+
+/**
+ * Transform a source path (relative to root, e.g. `src/foo.ts`) into the emitted
+ * JS path (relative to root, e.g. `lib/foo.js`) using the tsc outDir/rootDir.
+ */
+function sourceRelToJsRel(relSrc: string, outDir?: string, rootDir?: string): string {
+  let p = relSrc.replace(/\.tsx?$/, '.js');
+  if (rootDir != null && outDir != null) {
+    const rootRel = normalizeRel(path.relative(rootDir, p));
+    if (!rootRel.startsWith('..')) {
+      p = path.join(outDir, rootRel);
+    }
+  }
+  return normalizeRel(p);
 }
 
 /**

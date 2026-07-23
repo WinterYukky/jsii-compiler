@@ -105,6 +105,18 @@ fundamental limitation of the TS7 API; each maps to a specific piece of strada's
 - **Type strategy**: replace the `any`-typed `Ts7Host`/assembler with proper type
   abstractions once parity is locked.
 
+## Upstream API design feedback
+
+- **Whole-project emit beats per-file emit at scale.** An early emit pipeline
+  called `program.getEmitOutput(sf)` once per source file. At aws-cdk-lib scale
+  (~thousands of files) this issues one RPC round-trip per file and destabilized
+  the out-of-process tsgo session (observed `EPIPE` / process exit mid-run). The
+  fix — and the recommended usage — is a single whole-project `getEmitOutput()`
+  call (Go side emits in parallel, collects under a mutex), which collapses the
+  round-trips to one. Worth surfacing to the typescript-go API designers: either
+  document this clearly or make per-file emit cheaper/streamed for tools that
+  legitimately want incremental emit.
+
 ## Performance
 
 On aws-cdk-lib the jsii (check + assemble) step dropped from **119s → 41s (2.9x)**

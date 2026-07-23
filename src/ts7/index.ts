@@ -103,7 +103,12 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
     // produced.
     let emittedFiles: string[] = [];
     try {
-      ({ emittedFiles } = runTs7EmitPipeline(project, { projectRoot, assembly }));
+      ({ emittedFiles } = runTs7EmitPipeline(project, {
+        projectRoot,
+        assembly,
+        outDir: pkg.jsii?.tsc?.outDir,
+        rootDir: pkg.jsii?.tsc?.rootDir,
+      }));
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(`ts7 backend: emit pipeline failed (assembly was still written): ${(err as Error).message}`);
