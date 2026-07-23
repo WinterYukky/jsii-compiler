@@ -92,9 +92,18 @@ export class Ts7Assembler {
   private readonly _docCommentCache = new Map<string, any>();
   private _docCacheHits = 0;
 
+  // typeNode-independent _typeReference results, memoized by project-stable type.id.
+  private readonly _typeRefCache = new Map<unknown, any>();
+  private _typeRefCacheHits = 0;
+
   /** Number of doc-read cache hits (RPCs avoided). Exposed for perf reporting. */
   public get docCacheHits(): number {
     return this._docCacheHits;
+  }
+
+  /** Number of type-reference cache hits (redundant type resolutions avoided). */
+  public get typeRefCacheHits(): number {
+    return this._typeRefCacheHits;
   }
 
   // external dependency assemblies (peerDependencies): name -> Set(type names)
@@ -894,6 +903,26 @@ export class Ts7Assembler {
       return { primitive: 'any' };
     }
     const f = type.flags;
+
+    // Fast path + memoization for typeNode-INDEPENDENT results. These branches
+    // depend only on `type` (never on `typeNode`) and never write `optionalOut`,
+    // so their result can be cached by the project-stable `type.id`. This removes
+    // the ~5.75x redundant re-resolution of the same types seen in profiling
+    // (getTypeAtLocation 117k calls -> ~20k distinct). Union/intersection/array
+    // (which branch on `typeNode`/`optionalOut`) are intentionally NOT cached.
+    const isUnion = type.isUnionType?.();
+    const isIntersection = typeof type.isIntersectionType === 'function' && type.isIntersectionType();
+    const isArray = !isUnion && !isIntersection && this._isArrayType(type);
+    const cacheable = !isUnion && !isIntersection && !isArray;
+    const id = type.id;
+    if (cacheable && id != null) {
+      const hit = this._typeRefCache.get(id);
+      if (hit !== undefined) {
+        this._typeRefCacheHits++;
+        return hit === null ? undefined : hit;
+      }
+    }
+
     if (f & TypeFlags.EnumLike) {
       const s = type.getSymbol();
       const parent = s?.getParent();
@@ -903,54 +932,62 @@ export class Ts7Assembler {
           this._externalFqnOf(s) ??
           (parent && (this.typeFqnBySymbolId.get(parent.id) ?? this._externalFqnOf(parent))));
       if (fqn) {
-        return { fqn };
+        return this._cacheTypeRef(id, cacheable, { fqn });
       }
     }
     if (f & TypeFlags.NonPrimitive) {
-      return { primitive: 'json' };
+      return this._cacheTypeRef(id, cacheable, { primitive: 'json' });
     }
     if (f & TypeFlags.StringLike) {
-      return { primitive: 'string' };
+      return this._cacheTypeRef(id, cacheable, { primitive: 'string' });
     }
     if (f & TypeFlags.NumberLike) {
-      return { primitive: 'number' };
+      return this._cacheTypeRef(id, cacheable, { primitive: 'number' });
     }
     if (f & TypeFlags.BooleanLike) {
-      return { primitive: 'boolean' };
+      return this._cacheTypeRef(id, cacheable, { primitive: 'boolean' });
     }
     if (f & (TypeFlags.Any | TypeFlags.Unknown)) {
-      return { primitive: 'any' };
+      return this._cacheTypeRef(id, cacheable, { primitive: 'any' });
     }
     if (f & TypeFlags.Void) {
-      return undefined;
+      return this._cacheTypeRef(id, cacheable, undefined);
     }
-    if (type.isUnionType()) {
+    if (isUnion) {
       return this._unionTypeReference(type, optionalOut, typeNode);
     }
-    if (typeof type.isIntersectionType === 'function' && type.isIntersectionType()) {
+    if (isIntersection) {
       return this._intersectionTypeReference(type);
     }
-    if (this._isArrayType(type)) {
+    if (isArray) {
       const args = type.isTypeReference() ? this.checker.getTypeArguments(type) : [];
       return { collection: { elementtype: this._typeReference(args[0]), kind: 'array' } };
     }
     const sym = type.getSymbol();
     if (sym && sym.name === 'Date' && (sym.declarations?.[0]?.path ?? '').includes('/lib.')) {
-      return { primitive: 'date' };
+      return this._cacheTypeRef(id, cacheable, { primitive: 'date' });
     }
     if (sym) {
       const target = type.isTypeReference() ? type.getTarget() : type;
       const tsym = target.getSymbol() ?? sym;
       const fqn = this.typeFqnBySymbolId.get(tsym.id) ?? this._externalFqnOf(tsym);
       if (fqn) {
-        return { fqn };
+        return this._cacheTypeRef(id, cacheable, { fqn });
       }
     }
     const indexInfos = this.checker.getIndexInfosOfType(type);
     if (indexInfos.length) {
       return { collection: { elementtype: this._typeReference(indexInfos[0].valueType), kind: 'map' } };
     }
-    return { primitive: 'any' };
+    return this._cacheTypeRef(id, cacheable, { primitive: 'any' });
+  }
+
+  /** Store a typeNode-independent type reference in the cache (if cacheable) and return it. */
+  private _cacheTypeRef(id: unknown, cacheable: boolean, ref: any): any {
+    if (cacheable && id != null) {
+      this._typeRefCache.set(id, ref === undefined ? null : ref);
+    }
+    return ref;
   }
 
   private _unionTypeReference(type: any, optionalOut?: { optional?: boolean }, typeNode?: any): any {

@@ -94,7 +94,9 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
 
     if (process.env.JSII_TS7_TIMING) {
       // eslint-disable-next-line no-console
-      console.error(`ts7 doc-cache hits (RPCs avoided): ${assembler.docCacheHits}`);
+      console.error(
+        `ts7 cache hits: doc=${assembler.docCacheHits} typeRef=${assembler.typeRefCacheHits}`,
+      );
     }
 
     // Write the assembly first (the parity artifact), reusing @jsii/spec's writer
