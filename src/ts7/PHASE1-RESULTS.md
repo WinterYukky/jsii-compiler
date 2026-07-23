@@ -263,6 +263,81 @@ has been taken (−14% RPC, parity untouched). The remaining path to a lower
 wall-clock is in the client/API layer (type-response weight + the client
 type-cache miss), now quantified precisely enough for an upstream issue.
 
+## Phase 2C — typescript-go client type-cache PoC (closed)
+
+A follow-up PoC to the Phase 2B finding that the wall-clock is bound by
+out-of-process type transfer, not the Go compute. Hypothesis: the checker-level
+`getTypeAtLocation(node)` / `getTypeOfSymbolAtLocation(symbol, location)` issue an
+RPC on every call (the object registry only dedupes by the *returned* type handle,
+not by the *input*), so the same node/symbol is re-fetched repeatedly (~5.75x on
+aws-cdk-lib: 116,906 calls -> 20,317 distinct type ids).
+
+**Patch (client-only, no protocol change):** add input-keyed caches on the
+`Checker` — `Map<nodeId, Type>` for `getTypeAtLocation` (array overload fetches
+only cache misses) and `Map<symbol.id+':'+nodeId, Type>` for
+`getTypeOfSymbolAtLocation`, cleared on `dispose()` (a snapshot's program is
+immutable, so no stale risk). Branch: WinterYukky/typescript-go
+`draft/api-client-typecache-1784799727`.
+
+### Result (aws-cdk-lib, same c7i instance, 3-run median)
+
+| metric | before | after (patched client) | delta |
+|---|---|---|---|
+| RPC requests | 816,549 | **718,548** | **-98,001 (-12%)** |
+| wall-clock (median) | 41.5s | **39.3s** | -2.2s (-5%) |
+| bytesReceived | 957.8 MB | 947.6 MB | -10 MB (-1%) |
+| serverTimeMs | ~13.8s | ~13.6s | ~0 |
+| transportOverheadMs | ~19.0s | ~16.9s | -2.1s |
+
+**Parity (the absolute gate): PASSED.** before vs after `.jsii` were
+**byte-identical (100,735 / 100,735 members, 0 diffs)** — the cache never returns
+a stale type. All four gates intact: constructs 100%, cloud-assembly-schema 100%,
+aws-cdk-lib 99.9% (same known tail), synthetic consumer 100%.
+
+### Key finding: the 5.75x re-fetch was real but *cheap*; payload is the wall
+
+Cutting 98k RPCs (-12%) moved bytesReceived by only 10 MB (-1%). The duplicate
+`getType*` calls returned **small** payloads (the type was already materialized
+server-side, so repeats returned lightweight references). Profiling the response
+bytes **per method** (hooking `SyncRpcChannel.requestSync`) shows where the
+~947 MB actually comes from:
+
+| response bytes | calls | method |
+|---|---|---|
+| **344.6 MB** | **1** | **getEmitOutput** (whole-project JS + d.ts in one response) |
+| 107.7 MB | 40,272 | getPropertiesOfType |
+| 13.2 MB | 143,270 | getDocumentationComment |
+| 12.5 MB | 159,351 | getJsDocTags |
+| 12.5 MB | 52,996 | getTypesOfType |
+| 9.7 MB | 107,463 | getTypeOfSymbolAtLocation |
+| 8.9 MB | 20,743 | getExportsOfSymbol |
+| ... | | (tail) |
+
+Two dominant payloads: **(1) `getEmitOutput` alone is ~345 MB** — the entire
+emitted JS/d.ts for aws-cdk-lib returned in a single response; **(2)
+`getPropertiesOfType` ~108 MB** across 40k calls (full property/type objects for
+every type). The `getType*` duplicate-fetch traffic is comparatively tiny.
+
+### Conclusion
+
+The client type-cache is a **correct, safe, keeper improvement** (-12% RPC, -2.2s,
+parity byte-identical, client-only). But it is **not** the 5x unlock: the wall is
+the **type/emit payload transfer** (getEmitOutput 345 MB + getPropertiesOfType
+108 MB dominate the ~947 MB), which no client-side cache can remove. This
+quantitatively confirms and sharpens the Phase 2B conclusion.
+
+### Upstream feedback for microsoft/typescript-go (updated, with numbers)
+
+1. **Ship the input-keyed checker cache** (this patch): -12% RPC at zero
+   correctness cost, useful for any batch traversal tool.
+2. **The real lever is response-payload weight, not round-trip count.** For
+   full-project traversal at aws-cdk-lib scale (~947 MB received): (a)
+   `getEmitOutput` should support streaming / per-file / write-to-disk on the Go
+   side rather than returning ~345 MB in one JS payload; (b) type responses
+   (`getPropertiesOfType`, `getType*`) would benefit from **field selection /
+   lighter shapes / delta transfer** so a full assembly does not serialize every
+   type object in full.
+
 ## Performance
 
 On aws-cdk-lib the jsii (check + assemble) step dropped from **119s → 41s (2.9x)**
