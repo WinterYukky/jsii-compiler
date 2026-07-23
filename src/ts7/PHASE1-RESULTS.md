@@ -403,6 +403,69 @@ synchronous RPCs**. Cumulative: 44.3s (2B start) → 41.5s (2C) → **38.2s (2D)
 
 Raw measurement logs: `s3://alphaface-compile-transfer-tmp/lege-tsgo-poc/2d-artifacts.tar.gz`.
 
+## Phase 2E — request-count batching (closed): E1 kept, E2 reverted
+
+Phase 2D left ~718k synchronous RPCs at ~12-21µs of fixed round-trip cost each as
+the dominant remaining wall. Phase 2E attacked request count with batch APIs.
+
+### E1 — batched symbol docs (KEEPER)
+
+New additive endpoint `getSymbolDocumentations(symbols[])` (typescript-go branch
+`draft/api-batch-docs-1784812262`): one checker/langSvc setup per batch, each
+element exactly equal to the individual `getJsDocTags` + `getDocumentationComment`
+results (order preserved; a symbol that would fail an individual call fails the
+batch — no silent per-element drops). jsii prefetches per type's members, per
+enum's members and per registration pass into the existing `(path:index)`-keyed
+caches; call-site logic unchanged.
+
+| metric (aws-cdk-lib, 3-run median) | 2D baseline | E1 | delta |
+|---|---|---|---|
+| RPC requests | 718,548 | **500,458** | **-218,090 (-30%)** |
+| wall-clock | 38.4s | **35.5-36.6s** | ~-2.5s |
+| transportOverheadMs | ~15.4s | ~12.7s | **-2.7s** |
+| serverTimeMs / recv | ~15.3s / 604MB | ~15.2s / 608MB | ~0 |
+
+All gates passed (emit byte-identity, `.jsii` 0-diff, 4 parity gates). The
+reduction is linear in requests (~12µs/request of transport saved), confirming
+the fixed-cost model with an updated coefficient.
+
+### E2 — member/param type batching (REVERTED, twice measured, lesson kept)
+
+A batched `getTypeOfSymbolAtLocations(pairs[])` endpoint (same branch) plus jsii
+prefetching regressed twice and was reverted per the pre-agreed retreat rule:
+
+1. **Attempt 1 — prefetch before filtering: 47-52s (vs 38.4s), worsening run over
+   run.** Prefetching declared types for ALL members eagerly materialized masses
+   of types the lazy path never touched (private/internal members dominate at
+   aws-cdk-lib scale): new server compute + big TypeResponses + client-side
+   materialization + memory pressure. **Batching must not cross a lazy-evaluation
+   boundary**: fetching things laziness would have skipped converts an RPC saving
+   into a net loss.
+2. **Attempt 2 — filter-once → prefetch survivors only: 38.6s median (437k
+   requests)** — correct semantics, fewer requests than E1, but no wall-clock win
+   over E1 (36.6s): the surviving members' types were exactly the ones the visit
+   path fetches anyway (now client-cached), so the only saving was round-trip
+   fixed cost, offset by batch response materialization timing. Retreat condition
+   applied mechanically; both commits reverted (parity was intact throughout).
+3. **Small batches lose to fixed costs**: per-signature parameter batches
+   (average ~2 elements) increased total requests.
+
+### Upstream lessons (API design data points)
+
+- Batch endpoints pay off when (a) elements are *certain* to be needed (post-
+  filter), and (b) batches are large (hundreds+). Doc-style payloads (small,
+  self-contained) batch perfectly; type-graph payloads (large responses, lazy
+  materialization) can regress when batching front-runs laziness.
+- The remaining floor on aws-cdk-lib after E1: ~500k requests ≈ 12.7s transport +
+  15.2s server. Getting materially below ~35s requires either much coarser
+  traversal endpoints (e.g. "give me everything about type X in one call") or
+  async pipelining — both API-side designs, consistent with the 2D conclusion.
+
+### Cumulative series result
+
+119s (strada) → 41s (Phase 1) → 44.3→41.5s (2C) → 38.2s (2D) → **35.5s (2E-1)**
+= **3.4x faster than strada**, parity gates intact at every step.
+
 ## Performance
 
 On aws-cdk-lib the jsii (check + assemble) step dropped from **119s → 41s (2.9x)**
