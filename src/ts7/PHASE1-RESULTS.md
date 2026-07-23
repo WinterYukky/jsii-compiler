@@ -338,6 +338,71 @@ quantitatively confirms and sharpens the Phase 2B conclusion.
    lighter shapes / delta transfer** so a full assembly does not serialize every
    type object in full.
 
+## Phase 2D — getEmitOutput writeToDisk PoC (closed) & series conclusion
+
+Phase 2C isolated the ~947 MB payload as the suspected wall; its single largest
+component was `getEmitOutput` returning the whole emitted JS/d.ts in one ~345 MB
+response. Phase 2D eliminated that transfer to directly test the hypothesis
+"payload down → wall-clock down".
+
+**Patch** (typescript-go `draft/api-emit-writetodisk-1784803902`, jsii 54c0e03):
+optional `writeToDisk` on `getEmitOutput` — the server writes every output via
+`osvfs.FS().WriteFile` (the tsgo CLI's own emit writer: parent dirs ensured,
+UTF-8, no BOM) and returns names only; jsii reads back just the class-bearing
+`.js` files to append rtti. Backward compatible; write errors propagate as RPC
+errors. Implementation note: the snapshot's source FS is **read-only**
+(`WriteFile` panics "unimplemented") — emit must go through the real OS FS.
+
+### Gates (all passed)
+
+- **Emit byte-identity**: recursive diff of the emitted `lib/` (file set AND
+  contents, maps included) vs the previous in-memory path — **identical**,
+  rtti included. (This gate caught the sourceFS panic immediately on the first
+  attempt — the invalid run was discarded.)
+- `.jsii` 0-diff; constructs 100%, cloud-assembly-schema 100%, aws-cdk-lib 99.9%
+  (same known tail).
+
+### Result (aws-cdk-lib, same instance, 3-run median)
+
+| metric | baseline (2C) | after (2D) | delta |
+|---|---|---|---|
+| wall-clock | 41.5s | **38.2s** | **-3.3s (-8%)** |
+| bytesReceived | 947.6 MB | **603.9 MB** | **-343.7 MB (-36%)** |
+| transportOverheadMs | ~17.1s | ~15.2s | -1.9s |
+| serverTimeMs | ~15.1s | ~15.2s | ~0 |
+| RPC requests | 718,548 | 718,548 | 0 |
+
+### Series conclusion: the wall, identified by elimination
+
+The 2B→2C→2D sequence eliminated the suspects one by one:
+
+1. **2B — bytes are not the whole story**: cutting 85k RPCs (isArrayType) moved
+   wall-clock ~1s; app-level caches could not reach the redundant fetches.
+2. **2C — duplicate calls are cheap**: fixing the real client type-cache miss
+   (-98k RPCs, -12%) moved wall-clock -2.2s; payload barely changed.
+3. **2D — payload is not the whole story either**: removing **36% of all received
+   bytes** (-344 MB) moved wall-clock only **-8%** (-3.3s).
+
+What remains: roundTrip ≈ 30.5s = serverTime 15.2s + transport 15.3s, with
+**transport 15.3s / 718,548 requests ≈ 21µs of fixed synchronous round-trip cost
+per request**. The wall is neither Go compute (already faster than strada's
+checker: 15.2s vs 17.6s) nor bytes — it is the **serialized wait for ~718k
+synchronous RPCs**. Cumulative: 44.3s (2B start) → 41.5s (2C) → **38.2s (2D)**,
+**3.1x faster than strada (119s)**, parity intact at every step.
+
+### Upstream recommendation (final form)
+
+1. **Reduce request count by orders of magnitude via batch APIs** — the array
+   overloads exist; making traversal-scale consumers (and the client library's
+   internal lazy materialization) use them is where the remaining ~15s lives.
+2. **Break round-trip seriality in the API itself**: async pipelining /
+   request coalescing / server-push of predictable follow-ups, so a traversal
+   is not 718k sequential waits.
+3. Ship the 2C input-keyed checker cache and the 2D `writeToDisk` emit option
+   (both parity-proven here, byte-identical outputs).
+
+Raw measurement logs: `s3://alphaface-compile-transfer-tmp/lege-tsgo-poc/2d-artifacts.tar.gz`.
+
 ## Performance
 
 On aws-cdk-lib the jsii (check + assemble) step dropped from **119s → 41s (2.9x)**
