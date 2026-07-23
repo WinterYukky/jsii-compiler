@@ -45,7 +45,64 @@ The compressed on-disk form (`.jsii` redirect + `.jsii.gz`) is produced via the
 same `@jsii/spec` `writeAssembly` + a strada-identical fingerprint, so the output
 format matches strada exactly (not just the logical structure).
 
-## The 0.3% tail on aws-cdk-lib (Phase 2 backlog)
+## Phase 2A — tail reduction (correctness pass)
+
+Phase 2A ported more of strada's assembler semantics to shrink the aws-cdk-lib
+diff, keeping the three smaller gates at **100%** parity throughout.
+
+| metric (aws-cdk-lib) | Phase 1 | Phase 2A |
+|---|---|---|
+| members identical | 99.7% (100108) | **99.9% (100234)** |
+| field diffs | 25 | **1** |
+| member diffs | 635 | **509** |
+
+Landed:
+- **Interface heritage flattening** (`_processBaseInterfaces`): erase private/
+  internal/unexported bases and recurse into their bases; keep public bases as
+  `interfaces`. Fixed 24 of 25 field diffs.
+- **Intersection types** (`_intersectionTypeReference`): `A & B` →
+  `{ intersection: { types } }`. Eliminated all intersection diffs.
+- **Inherited constructor** (`_inheritedConstructor`): walk the `extends` chain
+  for the effective initializer when a class declares none.
+- **Member declaring-type resolution**: decide "own vs inherited-from-named-base"
+  by the member's *declaring* type symbol id. Fixed 96 MISSING members (static
+  factories, inherited interface methods).
+
+### Key learning: "declaring type" vs "membership type" (the getParent trap)
+
+For a member obtained from `checker.getPropertiesOfType(type)`, the member
+`symbol.getParent()` returns the *queried* type (membership), **not** the type
+that declares it. Using it to classify inherited members mis-labels them as
+"own" (this doubled EXTRA props to 701). The declaring type must be resolved from
+the member's owner declaration node via `getTypeAtLocation(ownerDecl).getSymbol()`,
+and compared by **symbol id** (never node identity — `NodeHandle.resolve()`
+re-materializes fresh nodes each call, so `===` on nodes is unreliable; this
+same trap bit the rtti injection earlier). Restored EXTRA to baseline (363) while
+keeping MISSING at 8.
+
+### Remaining Phase 2B tail (aws-cdk-lib)
+
+- **EXTRA 363** — some struct props (e.g. `AssetStagingProps.exclude/extraHash/
+  ignoreMode` from `FingerprintOptions`/`AssetOptions`) are still re-listed even
+  though the base is a named `interfaces` entry. The declaring-type resolution
+  handles most cases but not these (likely alias/re-export of the base type);
+  needs the same treatment strada applies via its deferred base-property dedup.
+- **DIFFER 138 — parameter docs (intentionally deferred).** jsii's parameter-doc
+  behavior is declaration-origin dependent (inherited/overridden methods omit
+  `@param` docs; own methods include them, split into summary + remarks). A naive
+  `@param` derivation was net-neutral and fragile, so it is deferred; reproduce
+  strada's `parseSymbolDocumentation` rules here.
+- **MISSING 8 — inherited static factory methods** (`fromXxxName`,
+  `fromXxxAttributes`, `isSecurityGroup`). The static-member loop only lists
+  statics declared directly on the class; strada re-lists inherited static
+  factories on subclasses. Extend the static loop with the same declaring-type
+  logic used for instance members.
+- **1 field diff — enum member strip-deprecated** (`EbsDeviceVolumeType`): ts7
+  keeps deprecated aliased enum members that strada strips. Apply the strip check
+  to enum members with strada's FQN form.
+- **1 missing type — `aws_docdb.CaCertificate`**: a single submodule-export edge.
+
+## The 0.3% tail on aws-cdk-lib (Phase 1 categorization, superseded by Phase 2A above)
 
 All differences fall into a small number of enumerated categories. None indicate a
 fundamental limitation of the TS7 API; each maps to a specific piece of strada's
