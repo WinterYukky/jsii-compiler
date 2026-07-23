@@ -86,9 +86,16 @@ export class Ts7Assembler {
   private readonly typeFqnBySymbolId = new Map<unknown, string>();
   private readonly exported: RegisteredType[] = [];
 
-  // Phase 2B perf caches: memoize per-symbol doc reads (each is an RPC).
-  private readonly _jsDocTagsCache = new Map<unknown, any[]>();
-  private readonly _docCommentCache = new Map<unknown, any>();
+  // Phase 2B perf caches: memoize per-symbol doc reads (each is an RPC), keyed by
+  // the symbol's declaration coordinate (path:index), which is stable.
+  private readonly _jsDocTagsCache = new Map<string, any[]>();
+  private readonly _docCommentCache = new Map<string, any>();
+  private _docCacheHits = 0;
+
+  /** Number of doc-read cache hits (RPCs avoided). Exposed for perf reporting. */
+  public get docCacheHits(): number {
+    return this._docCacheHits;
+  }
 
   // external dependency assemblies (peerDependencies): name -> Set(type names)
   private readonly externalDeps = new Map<string, Set<string>>();
@@ -165,34 +172,50 @@ export class Ts7Assembler {
   /**
    * Memoized `symbol.getJsDocTags(checker)`. The same symbol's tags are consulted
    * multiple times per member (isInternal + isDeprecated + _visitDocumentation),
-   * and each call is an out-of-process round-trip; cache by symbol id. Results are
-   * value-identical to the uncached call (pure read), so parity is unaffected.
+   * and each call is an out-of-process round-trip. Keyed by the symbol's first
+   * declaration coordinate `path:index` (a NodeHandle field readable WITHOUT a
+   * resolve() RPC and stable across re-materialization — unlike `symbol.id`,
+   * which is undefined/unstable here and made the previous cache inert). Results
+   * are value-identical to the uncached call (pure read), so parity is unaffected.
    */
   private _jsDocTags(sym: any): any[] {
-    const id = sym?.id;
-    if (id == null) {
-      return sym.getJsDocTags(this.checker);
+    const key = this._symbolDocKey(sym);
+    if (key == null) {
+      return sym.getJsDocTags(this.checker) ?? [];
     }
-    let tags: any = this._jsDocTagsCache.get(id);
+    let tags: any = this._jsDocTagsCache.get(key);
     if (tags === undefined) {
       tags = sym.getJsDocTags(this.checker) ?? [];
-      this._jsDocTagsCache.set(id, tags);
+      this._jsDocTagsCache.set(key, tags);
+    } else {
+      this._docCacheHits++;
     }
     return tags;
   }
 
-  /** Memoized `symbol.getDocumentationComment(checker)` (keyed by symbol id). */
+  /** Memoized `symbol.getDocumentationComment(checker)` (keyed by declaration coordinate). */
   private _docComment(sym: any): any {
-    const id = sym?.id;
-    if (id == null) {
+    const key = this._symbolDocKey(sym);
+    if (key == null) {
       return sym.getDocumentationComment(this.checker);
     }
-    let doc = this._docCommentCache.get(id);
+    let doc = this._docCommentCache.get(key);
     if (doc === undefined) {
       doc = sym.getDocumentationComment(this.checker) ?? null;
-      this._docCommentCache.set(id, doc);
+      this._docCommentCache.set(key, doc);
+    } else {
+      this._docCacheHits++;
     }
     return doc;
+  }
+
+  /** Stable per-symbol key from its first declaration's (path, index); undefined if none. */
+  private _symbolDocKey(sym: any): string | undefined {
+    const d0 = sym?.declarations?.[0];
+    if (!d0 || d0.path == null || d0.index == null) {
+      return undefined;
+    }
+    return `${d0.path}:${d0.index}`;
   }
 
   private _shouldStrip(sym: any, fqn: string): boolean {

@@ -92,6 +92,11 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
 
     const assembly = assembler.assemble();
 
+    if (process.env.JSII_TS7_TIMING) {
+      // eslint-disable-next-line no-console
+      console.error(`ts7 doc-cache hits (RPCs avoided): ${assembler.docCacheHits}`);
+    }
+
     // Write the assembly first (the parity artifact), reusing @jsii/spec's writer
     // so the on-disk format (incl. the compressed file-redirect variant) is
     // byte-for-byte compatible with the strada path.
