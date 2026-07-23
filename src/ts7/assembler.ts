@@ -528,8 +528,7 @@ export class Ts7Assembler {
       const sig = this.checker.getSignatureFromDeclaration(effectiveCtor);
       const initializer: any = { locationInModule: this._locationOf(effectiveCtor) };
       if (sig) {
-        const paramDocs = this._ctorParamDocs(sig, effectiveCtor);
-        const params = sig.getParameters().map((p: any) => this._visitParameter(p, paramDocs));
+        const params = sig.getParameters().map((p: any) => this._visitParameter(p));
         if (params.length) {
           initializer.parameters = params;
         }
@@ -632,14 +631,19 @@ export class Ts7Assembler {
       const isParamProp = pDecl.kind === SyntaxKind.Parameter;
       const owner = isParamProp ? pDecl.parent?.parent : pDecl.parent;
       if (owner !== decl) {
-        const ownerSym = owner?.name ? this.checker.getSymbolAtLocation(owner.name) : undefined;
-        // A member declared on another type is re-listed here only when that type
-        // is an erased base (private/internal/unexported); if it is a named base
-        // (has its own FQN, referenced via interfaces/base) it is NOT re-listed.
+        // Resolve the owning type via the member symbol's parent (stable — the
+        // containing type's symbol), instead of the fragile getSymbolAtLocation
+        // on the owner declaration's name node.
+        const ownerSym = p.getParent?.() ?? (owner?.name ? this.checker.getSymbolAtLocation(owner.name) : undefined);
         const ownerId = ownerSym?.id;
+        const isOwn = ownerId != null && ownerId === sym?.id;
+        // A member declared on another type is re-listed here only when that type
+        // is this type itself or an erased base (private/internal/unexported); if
+        // it is a named base (own FQN, referenced via interfaces/base) it is NOT
+        // re-listed here.
         const isErasedBase = ownerId != null && erasedBaseSymIds.has(ownerId);
-        const pfqn = ownerSym && (this.typeFqnBySymbolId.get(ownerSym.id) ?? this._externalFqnOf(ownerSym));
-        if (pfqn && !isErasedBase) {
+        const pfqn = ownerSym && (this.typeFqnBySymbolId.get(ownerId) ?? this._externalFqnOf(ownerSym));
+        if (pfqn && !isOwn && !isErasedBase) {
           continue; // declared on an exported/foreign named base: not re-listed
         }
       }
@@ -705,8 +709,7 @@ export class Ts7Assembler {
       m.protected = true;
     }
     if (sig) {
-      const paramDocs = this._paramDocsOf(msym);
-      const params = sig.getParameters().map((p: any) => this._visitParameter(p, paramDocs));
+      const params = sig.getParameters().map((p: any) => this._visitParameter(p));
       if (params.length) {
         m.parameters = params;
       }
@@ -759,7 +762,7 @@ export class Ts7Assembler {
     return this._withDefaultDocs(p);
   }
 
-  private _visitParameter(prm: any, paramDocs?: Map<string, string>): any {
+  private _visitParameter(prm: any): any {
     const decl = prm.declarations?.[0]?.resolve(this.project);
     const t = decl ? this.checker.getTypeOfSymbolAtLocation(prm, decl) : undefined;
     const opt: { optional?: boolean } = {};
@@ -770,73 +773,16 @@ export class Ts7Assembler {
     } else if (decl?.questionToken != null || decl?.initializer != null || opt.optional) {
       p.optional = true;
     }
-    // Parameter docs come from the owner signature's `@param <name> <desc>` tags,
-    // not from the parameter symbol's own comment. jsii splits the description
-    // into a first-sentence summary and remainder remarks, same as other docs.
-    const rawSummary = paramDocs?.get(prm.name);
-    if (rawSummary) {
-      const { summary, remarks } = this._splitSummary(rawSummary.trim());
-      p.docs = { ...(p.docs ?? {}) };
-      if (summary) {
-        p.docs.summary = summary;
-      }
-      if (remarks) {
-        p.docs.remarks = remarks;
-      }
-    } else {
-      const d = this._visitDocumentation(prm);
-      if (d) {
-        p.docs = d;
-      }
+    // NOTE (Phase 2B): parameter docs (`@param`) are intentionally NOT derived
+    // here. jsii's parameter-doc behavior is declaration-origin dependent (e.g.
+    // inherited/overridden methods omit them) and reproducing it from the raw
+    // JSDoc tags was net-neutral and fragile. Deferred to Phase 2B; see
+    // PHASE1-RESULTS.md.
+    const d = this._visitDocumentation(prm);
+    if (d) {
+      p.docs = d;
     }
     return p;
-  }
-
-  /**
-   * Extract `@param <name> <description>` docs from a method/constructor symbol,
-   * returning a map of parameter name -> summary text.
-   */
-  private _paramDocsOf(ownerSym: any): Map<string, string> {
-    const out = new Map<string, string>();
-    if (!ownerSym?.getJsDocTags) {
-      return out;
-    }
-    this._collectParamTags(ownerSym.getJsDocTags(this.checker), out);
-    return out;
-  }
-
-  /** Constructor `@param` docs: try the signature, then the ctor declaration's symbol. */
-  private _ctorParamDocs(sig: any, ctorDecl: any): Map<string, string> {
-    const out = new Map<string, string>();
-    if (sig?.getJsDocTags) {
-      this._collectParamTags(sig.getJsDocTags(this.checker), out);
-    }
-    if (out.size === 0) {
-      const s = ctorDecl?.symbol ?? (ctorDecl?.name ? this.checker.getSymbolAtLocation(ctorDecl.name) : undefined);
-      if (s?.getJsDocTags) {
-        this._collectParamTags(s.getJsDocTags(this.checker), out);
-      }
-    }
-    return out;
-  }
-
-  private _collectParamTags(tags: any[], out: Map<string, string>): void {
-    for (const tag of tags ?? []) {
-      if (tag.name !== 'param') {
-        continue;
-      }
-      const text = typeof tag.text === 'string' ? tag.text : (tag.text ?? []).map((x: any) => x.text).join('');
-      const trimmed = text.trim();
-      const sp = trimmed.search(/\s/);
-      if (sp <= 0) {
-        continue;
-      }
-      const pname = trimmed.slice(0, sp);
-      const desc = trimmed.slice(sp + 1).trim();
-      if (pname && desc && !out.has(pname)) {
-        out.set(pname, desc);
-      }
-    }
   }
 
   // -------------------------------------------------------------------------
