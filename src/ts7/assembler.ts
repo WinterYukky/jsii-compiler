@@ -86,6 +86,10 @@ export class Ts7Assembler {
   private readonly typeFqnBySymbolId = new Map<unknown, string>();
   private readonly exported: RegisteredType[] = [];
 
+  // Phase 2B perf caches: memoize per-symbol doc reads (each is an RPC).
+  private readonly _jsDocTagsCache = new Map<unknown, any[]>();
+  private readonly _docCommentCache = new Map<unknown, any>();
+
   // external dependency assemblies (peerDependencies): name -> Set(type names)
   private readonly externalDeps = new Map<string, Set<string>>();
   private readonly stripDeprecated: boolean;
@@ -151,11 +155,44 @@ export class Ts7Assembler {
   }
 
   private _isInternal(sym: any): boolean {
-    return sym.getJsDocTags(this.checker).some((t: any) => t.name === 'internal') || sym.name.startsWith('_');
+    return this._jsDocTags(sym).some((t: any) => t.name === 'internal') || sym.name.startsWith('_');
   }
 
   private _isDeprecated(sym: any): boolean {
-    return sym.getJsDocTags(this.checker).some((t: any) => t.name === 'deprecated');
+    return this._jsDocTags(sym).some((t: any) => t.name === 'deprecated');
+  }
+
+  /**
+   * Memoized `symbol.getJsDocTags(checker)`. The same symbol's tags are consulted
+   * multiple times per member (isInternal + isDeprecated + _visitDocumentation),
+   * and each call is an out-of-process round-trip; cache by symbol id. Results are
+   * value-identical to the uncached call (pure read), so parity is unaffected.
+   */
+  private _jsDocTags(sym: any): any[] {
+    const id = sym?.id;
+    if (id == null) {
+      return sym.getJsDocTags(this.checker);
+    }
+    let tags: any = this._jsDocTagsCache.get(id);
+    if (tags === undefined) {
+      tags = sym.getJsDocTags(this.checker) ?? [];
+      this._jsDocTagsCache.set(id, tags);
+    }
+    return tags;
+  }
+
+  /** Memoized `symbol.getDocumentationComment(checker)` (keyed by symbol id). */
+  private _docComment(sym: any): any {
+    const id = sym?.id;
+    if (id == null) {
+      return sym.getDocumentationComment(this.checker);
+    }
+    let doc = this._docCommentCache.get(id);
+    if (doc === undefined) {
+      doc = sym.getDocumentationComment(this.checker) ?? null;
+      this._docCommentCache.set(id, doc);
+    }
+    return doc;
   }
 
   private _shouldStrip(sym: any, fqn: string): boolean {
@@ -960,7 +997,7 @@ export class Ts7Assembler {
   // -------------------------------------------------------------------------
 
   private _visitDocumentation(sym: any): any | undefined {
-    const summaryRaw = sym.getDocumentationComment(this.checker);
+    const summaryRaw = this._docComment(sym);
     const docs: any = {};
     if (summaryRaw) {
       const text = typeof summaryRaw === 'string' ? summaryRaw.trim() : String(summaryRaw).trim();
@@ -970,7 +1007,7 @@ export class Ts7Assembler {
       }
       docs.summary = summary;
     }
-    for (const tag of sym.getJsDocTags(this.checker)) {
+    for (const tag of this._jsDocTags(sym)) {
       let tagText =
         typeof tag.text === 'string' ? tag.text : (tag.text ?? []).map((p: any) => p.text).join('');
       tagText = tagText.replace(/\{@link\s+([^}]*?)\s*\}/g, '{@link $1 }');

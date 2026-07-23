@@ -46,10 +46,22 @@ export class Ts7Host {
     const np = await loadNativePreview();
     const tsconfigPath = path.join(projectRoot, tsconfigFileName);
 
-    const api = new np.API({ cwd: projectRoot, tsserverPath: np.tsgoPath });
+    // collectTiming lets us report RPC request counts / bytes for perf work
+    // (opt-in via JSII_TS7_TIMING; negligible overhead but off by default).
+    const collectTiming = !!process.env.JSII_TS7_TIMING;
+    const api = new np.API({ cwd: projectRoot, tsserverPath: np.tsgoPath, collectTiming });
     const snapshot = api.updateSnapshot({ openProjects: [tsconfigPath] });
 
     return new Ts7Host(np, api, snapshot, tsconfigPath);
+  }
+
+  /** RPC timing info (requestCount/bytes) when JSII_TS7_TIMING is enabled. */
+  public getTimingInfo(): any {
+    try {
+      return this.api.getTimingInfo();
+    } catch {
+      return undefined;
+    }
   }
 
   /** The program + checker for the opened project. */

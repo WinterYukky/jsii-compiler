@@ -116,6 +116,16 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
 
     return { assembly, typeCount: Object.keys(assembly.types ?? {}).length, emittedFiles };
   } finally {
+    if (process.env.JSII_TS7_TIMING) {
+      const t = host.getTimingInfo?.();
+      if (t?.totals) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `ts7 timing: requests=${t.totals.requestCount} roundTripMs=${Math.round(t.totals.roundTripMs)} ` +
+            `sent=${t.totals.bytesSent} recv=${t.totals.bytesReceived}`,
+        );
+      }
+    }
     host.close();
   }
 }
