@@ -25,6 +25,17 @@ compared with `poc/typescript7/compare-jsii.mjs` (which normalizes
 | 2b | `cloud-assembly-schema` | 59 | 213 | **100%** | 0.25s vs 0.77s |
 | A (stretch) | `aws-cdk-lib` | 20,744 | 100,108 / 100,380 | **99.7%** | **41s vs 119s (2.9x)** |
 
+### M5 — JS/d.ts emit + rtti (the "and JS/d.ts are emitted" half of the goal)
+
+Building `constructs` with the ts7 backend emits the full artifact set and the
+injected rtti matches strada at runtime:
+
+- **7 `.js` + 7 `.d.ts` emitted** (same set as strada).
+- **`index.d.ts` byte-identical** to strada's output.
+- **rtti identical for 5/5 exported classes** — each carries
+  `Symbol.for("jsii.rtti") = { fqn, version }` equal to strada's, verified by
+  `require()`-ing both `lib/`s and comparing at runtime.
+
 Gate 2 specifically validated the **external-assembly resolution path**: a class
 `extends constructs.Construct`, an interface `extends constructs.IConstruct`, and
 properties/params typed as external `constructs.*` types — all resolved to the
