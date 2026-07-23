@@ -631,18 +631,16 @@ export class Ts7Assembler {
       const isParamProp = pDecl.kind === SyntaxKind.Parameter;
       const owner = isParamProp ? pDecl.parent?.parent : pDecl.parent;
       if (owner !== decl) {
-        // Resolve the owning type via the member symbol's parent (stable — the
-        // containing type's symbol), instead of the fragile getSymbolAtLocation
-        // on the owner declaration's name node.
-        const ownerSym = p.getParent?.() ?? (owner?.name ? this.checker.getSymbolAtLocation(owner.name) : undefined);
-        const ownerId = ownerSym?.id;
+        // Resolve the *declaring* type of this member via the owner declaration
+        // node's type symbol. NOTE: do NOT use `p.getParent()` here — for a member
+        // obtained from getPropertiesOfType(type) that returns the *queried* type
+        // (membership), not the declaring type, which mis-classifies inherited
+        // members as own. getTypeAtLocation(owner) gives the declaring type.
+        const ownerTypeSym = owner ? this.checker.getTypeAtLocation(owner)?.getSymbol?.() : undefined;
+        const ownerId = ownerTypeSym?.id;
         const isOwn = ownerId != null && ownerId === sym?.id;
-        // A member declared on another type is re-listed here only when that type
-        // is this type itself or an erased base (private/internal/unexported); if
-        // it is a named base (own FQN, referenced via interfaces/base) it is NOT
-        // re-listed here.
         const isErasedBase = ownerId != null && erasedBaseSymIds.has(ownerId);
-        const pfqn = ownerSym && (this.typeFqnBySymbolId.get(ownerId) ?? this._externalFqnOf(ownerSym));
+        const pfqn = ownerTypeSym && (this.typeFqnBySymbolId.get(ownerId) ?? this._externalFqnOf(ownerTypeSym));
         if (pfqn && !isOwn && !isErasedBase) {
           continue; // declared on an exported/foreign named base: not re-listed
         }
