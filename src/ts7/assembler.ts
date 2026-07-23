@@ -771,12 +771,18 @@ export class Ts7Assembler {
       p.optional = true;
     }
     // Parameter docs come from the owner signature's `@param <name> <desc>` tags,
-    // not from the parameter symbol's own comment. Fall back to the parameter
-    // symbol's own doc comment. Normalize the summary the same way as other docs
-    // (collapse whitespace, ensure a terminal period).
+    // not from the parameter symbol's own comment. jsii splits the description
+    // into a first-sentence summary and remainder remarks, same as other docs.
     const rawSummary = paramDocs?.get(prm.name);
     if (rawSummary) {
-      p.docs = { ...(p.docs ?? {}), summary: this._normalizeSummary(rawSummary) };
+      const { summary, remarks } = this._splitSummary(rawSummary.trim());
+      p.docs = { ...(p.docs ?? {}) };
+      if (summary) {
+        p.docs.summary = summary;
+      }
+      if (remarks) {
+        p.docs.remarks = remarks;
+      }
     } else {
       const d = this._visitDocumentation(prm);
       if (d) {
