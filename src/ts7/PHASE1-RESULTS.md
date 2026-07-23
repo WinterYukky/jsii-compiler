@@ -174,6 +174,95 @@ fundamental limitation of the TS7 API; each maps to a specific piece of strada's
   document this clearly or make per-file emit cheaper/streamed for tools that
   legitimately want incremental emit.
 
+## Phase 2B — performance pass (closed)
+
+Goal: get the ts7 jsii step (already ~2.9x faster than strada) toward a ~15s
+target on aws-cdk-lib. Approach: reduce out-of-process RPCs on the hot path,
+proving each change does not regress parity.
+
+### What landed (proven wins, parity 100% maintained)
+
+- **Client-side array-type check** (`_isArrayType`): replaced
+  `checker.isArrayType` (~85k RPCs on aws-cdk-lib) with a local check
+  (`isTypeReference` objectFlags bit + target symbol name `Array`/`ReadonlyArray`
+  from `lib.*.d.ts`). Verified byte-identical `.jsii` vs `checker.isArrayType`.
+- **Per-symbol doc-read memoization** (`_jsDocTags`/`_docComment`), keyed by the
+  symbol's declaration coordinate (`NodeHandle.path:index` — stable, readable
+  without a `resolve()` RPC; `symbol.id` was undefined/unstable here and made an
+  earlier attempt inert). ~520k logical hits on aws-cdk-lib.
+
+Net: aws-cdk-lib RPCs **946k → 816k (−14%)** with parity unchanged.
+
+### What did NOT work, and why (the important finding)
+
+1. **`_typeReference` memoization by `type.id`** (implemented, measured,
+   reverted: af893c7 → df4f574). Profiling showed `getTypeAtLocation` issuing
+   **116,906 calls for only 20,317 distinct type ids (~5.75x)**, suggesting
+   redundant type resolution. But memoizing the assembler's `_typeReference`
+   results changed **neither RPC count nor wall-clock**: the redundant
+   `getTypeAtLocation` RPCs do not originate from the assembler's call sites — the
+   `type` objects reach `_typeReference` already resolved, and those RPCs are
+   issued earlier by the client's lazy type materialization. The redundancy lives
+   **below the application layer**, so an app-level cache cannot remove it.
+2. **Parameter docs derivation** (Phase 2A #5, deferred): net-neutral and
+   declaration-origin dependent; see the Phase 2A section.
+
+### Where the wall-clock actually goes (measured, aws-cdk-lib, 3-run median)
+
+`getTimingInfo()` with `collectTiming` on the ts7 emit:
+
+- **roundTripMs ≈ 34.9s = serverTimeMs ≈ 15.3s + transportOverheadMs ≈ 19.8s**
+- **bytesReceived ≈ 957 MB** across ~816k requests.
+
+- **The Go compiler is not the bottleneck.** serverTimeMs (~15.3s, the Go-side
+  type computation) is *lower* than strada's in-process checker time (~17.6s,
+  measured in Phase 1). The Go port does the same semantic work as fast or faster.
+- **The out-of-process type transfer is the bottleneck.** ~957 MB of type-object
+  payload + transport (~19.8s), amplified by redundant type fetches, dominate the
+  ~44s wall-clock. RPC *count* is not the driver (cutting 85k isArrayType RPCs
+  moved wall-clock ~1s).
+
+### Upstream feedback for microsoft/typescript-go (actionable, with repro)
+
+1. **Client type-cache miss: same type re-fetched ~5.75x.**
+   `ProjectObjectRegistry` dedupes `Type` objects by id, yet `getTypeAtLocation`
+   is observed fetching the same types repeatedly: **116,906 calls resolve to only
+   20,317 distinct type ids** on aws-cdk-lib. Some resolution paths (lazy
+   materialization of type properties / `getTypeArguments` / union member
+   expansion) appear to miss the client-side type cache's hit condition and issue
+   a fresh server fetch for an already-known type id.
+
+   *Reproduction:* monkey-patch `Client.prototype.apiRequest` to tally calls and
+   the returned object's `id` per method, then run a full aws-cdk-lib assembly
+   through the sync API. `getTypeAtLocation` shows calls (116,906) ≫ distinct ids
+   (20,317).
+
+2. **Type-response payload dominates at scale.** ~957 MB received for one
+   aws-cdk-lib assembly. Batch APIs (`getTypeAtLocation(nodes[])`) cut round-trips
+   but not this payload. What moves the needle: **lighter type responses / field
+   selection / delta transfer**, plus closing the cache miss above so each type is
+   serialized once rather than ~6x.
+
+### Final numbers (Phase 1 → Phase 2 close-out, aws-cdk-lib)
+
+| metric | value |
+|---|---|
+| strada jsii (reference) | ~119s |
+| ts7 jsii (wall-clock, 3-run median) | **~44.3s** (~2.7x faster) |
+| ts7 serverTimeMs (Go type compute) | ~15.3s (< strada checker ~17.6s) |
+| ts7 transportOverheadMs | ~19.8s |
+| ts7 bytesReceived | ~957 MB |
+| ts7 RPC requests (Phase 1 → 2B) | 946k → **816k (−14%)** |
+| `.jsii` parity — constructs | **100%** (53/53 members) |
+| `.jsii` parity — synthetic consumer | **100%** (7/7) |
+| `.jsii` parity — cloud-assembly-schema | **100%** (213/213) |
+| `.jsii` parity — aws-cdk-lib | **99.9%** (100,234/100,380; 1 field diff) |
+
+**Phase 2B is closed.** Every optimization reachable from the application layer
+has been taken (−14% RPC, parity untouched). The remaining path to a lower
+wall-clock is in the client/API layer (type-response weight + the client
+type-cache miss), now quantified precisely enough for an upstream issue.
+
 ## Performance
 
 On aws-cdk-lib the jsii (check + assemble) step dropped from **119s → 41s (2.9x)**
