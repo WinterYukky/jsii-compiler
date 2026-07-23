@@ -113,6 +113,38 @@ export class Compiler implements Emitter {
   }
 
   /**
+   * Experimental: compile using the TypeScript 7 (tsgo) backend instead of the
+   * classic in-process "Strada" compiler. Enabled via `JSII_COMPILER_BACKEND=ts7`.
+   *
+   * Phase 1 scope: normal-path `.jsii` parity. This path does not run jsii's
+   * negative-path diagnostics; see `src/ts7/assembler.ts` for the rationale and
+   * the deferred Phase 2 integration decision. The strada `emit()` above is the
+   * default and is entirely unaffected.
+   */
+  public async emitTs7(): Promise<ts.EmitResult> {
+    // Ensure a tsconfig exists on disk for tsgo to open (same as the strada path).
+    if (!this.userProvidedTypeScriptConfig) {
+      this.writeTypeScriptConfig();
+    }
+
+    // Lazy import: the ts7 backend pulls in the optional native-preview toolchain,
+    // which must not be a hard dependency of the default strada path.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { ts7Emit } = require('./ts7') as typeof import('./ts7');
+    const result = await ts7Emit({
+      projectRoot: this.projectRoot,
+      stripDeprecated: this.options.stripDeprecated,
+      stripDeprecatedAllowListFile: this.options.stripDeprecatedAllowListFile,
+      compressAssembly: this.options.compressAssembly,
+    });
+
+    LOG.info(`ts7 backend: assembled ${result.typeCount} types`);
+
+    // Phase 1 does not surface jsii diagnostics through this path.
+    return { emitSkipped: false, diagnostics: [], emittedFiles: [] };
+  }
+
+  /**
    * Watches for file-system changes and dynamically recompiles the project as needed. In non-blocking mode, this
    * returns the TypeScript watch handle for the application to use.
    *

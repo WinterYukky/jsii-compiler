@@ -10,6 +10,7 @@ import * as yargs from 'yargs';
 
 import { Compiler } from './compiler';
 import { configureCategories, JsiiDiagnostic } from './jsii-diagnostic';
+import { isTs7BackendEnabled } from './ts7';
 import { loadProjectInfo } from './project-info';
 import { emitSupportPolicyInformation } from './support';
 import { TypeScriptConfigValidationRuleSet } from './tsconfig';
@@ -168,7 +169,11 @@ enum OPTION_GROUP {
           });
 
           const startTime = Date.now();
-          const emitResult = argv.watch ? await compiler.watch() : compiler.emit();
+          const emitResult = argv.watch
+            ? await compiler.watch()
+            : isTs7BackendEnabled()
+            ? await compiler.emitTs7()
+            : compiler.emit();
 
           const allDiagnostics = [...projectInfoDiagnostics, ...emitResult.diagnostics];
 

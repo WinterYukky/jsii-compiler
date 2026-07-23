@@ -50,9 +50,9 @@ CACHE_KEY="${S3_CACHE}/ts7-toolchain-${SHORT}.tar.gz"
 log "toolchain commit=${SHORT}"
 log "cache key=${CACHE_KEY}"
 
-# Fast path: already provisioned locally for this commit.
+# Fast path: already provisioned locally for this commit (skipped when FORCE_BUILD=1).
 STAMP="${TS7_DIR}/.commit"
-if [ -f "${TS7_DIR}/tsgo" ] && [ -f "${TS7_DIR}/native-preview/dist/api/sync/api.js" ] \
+if [ "${FORCE_BUILD}" != "1" ] && [ -f "${TS7_DIR}/tsgo" ] && [ -f "${TS7_DIR}/native-preview/dist/api/sync/api.js" ] \
    && [ "$(cat "${STAMP}" 2>/dev/null || true)" = "${COMMIT}" ]; then
   log "toolchain already present for ${SHORT}; nothing to do"
   echo "${TS7_DIR}"
@@ -94,9 +94,16 @@ log "building @typescript/native-preview client (npm ci && npm run build) ..."
 ( cd "${BUILD_DIR}" && npm ci )
 ( cd "${BUILD_DIR}/_packages/native-preview" && npm run build )
 mkdir -p "${TS7_DIR}/native-preview"
-# copy the built package (dist + package.json + node bindings it needs at runtime)
-cp -R "${BUILD_DIR}/_packages/native-preview/dist" "${TS7_DIR}/native-preview/dist"
-cp "${BUILD_DIR}/_packages/native-preview/package.json" "${TS7_DIR}/native-preview/package.json"
+# Copy the built package as the package.json "files" field declares (bin/lib/dist/vendor),
+# plus package.json itself. dist/api/options.js imports ../../lib/getExePath.js at runtime,
+# so lib/ (generated during build) must be included alongside dist/.
+NP_SRC="${BUILD_DIR}/_packages/native-preview"
+cp "${NP_SRC}/package.json" "${TS7_DIR}/native-preview/package.json"
+for d in dist lib bin vendor; do
+  if [ -e "${NP_SRC}/${d}" ]; then
+    cp -R "${NP_SRC}/${d}" "${TS7_DIR}/native-preview/${d}"
+  fi
+done
 
 echo "${COMMIT}" > "${STAMP}"
 

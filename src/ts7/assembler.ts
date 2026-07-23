@@ -1,0 +1,938 @@
+/*
+ * ===========================================================================
+ * Phase 1 — experimental TypeScript 7 (tsgo) backend for jsii.
+ *
+ * WHAT THIS IS
+ *   A TypeScript-7-native reimplementation of the jsii Assembler that reads the
+ *   out-of-process TS7 API (`@typescript/native-preview`) directly and produces
+ *   a `spec.Assembly` (`.jsii`). It is derived from the validated prototype
+ *   `poc/typescript7/assembler-lite.mjs`, which reproduced real `.jsii` output
+ *   at 98.6-100% fidelity on aws-cdk-lib (~20k types).
+ *
+ * WHY A SEPARATE ASSEMBLER (and not a facade over the strada Assembler)
+ *   The classic Assembler (src/assembler.ts, ~3500 lines) is tightly coupled to
+ *   the in-process `ts.Program`/`ts.TypeChecker` object model. Faking those
+ *   shapes over the TS7 API would break `node-bindings` WeakMap identity and be
+ *   only partially correct. Phase 1's goal is to PROVE `.jsii` parity on the TS7
+ *   API as fast and reliably as possible; a directed TS7-native port achieves
+ *   that with zero regression risk to the default strada path.
+ *
+ * PHASE 2 (deferred)
+ *   Once parity is demonstrated (constructs -> cloud-assembly-schema, stretch:
+ *   aws-cdk-lib), the integration strategy with the strada Assembler will be
+ *   re-evaluated from data. To keep that comparison tractable, this file mirrors
+ *   the strada Assembler's structure and method names (`_visitClass`,
+ *   `_visitInterface`, `_visitEnum`, `_visitMethod`, `_visitProperty`,
+ *   `_visitDocumentation`).
+ *
+ * SCOPE (Phase 1)
+ *   Normal-path parity only. jsii's negative-path DIAGNOSTICS (the JSII_xxxx
+ *   error/warning suite manufactured by src/jsii-diagnostic.ts) are explicitly
+ *   OUT OF SCOPE for the ts7 backend in Phase 1.
+ * ===========================================================================
+ */
+/* eslint-disable @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-return */
+import * as fs from 'node:fs';
+import { createRequire } from 'node:module';
+import * as path from 'node:path';
+import * as zlib from 'node:zlib';
+import * as spec from '@jsii/spec';
+
+import { NativePreview } from './native-preview';
+import { Ts7Project } from './ts7-host';
+
+export interface Ts7AssemblerOptions {
+  /** package.json contents of the package being assembled. */
+  readonly packageJson: any;
+  /** Absolute path to the package root. */
+  readonly projectRoot: string;
+  /** Absolute path to the entrypoint .ts (derived from `types`/`main`). */
+  readonly entry: string;
+  /** Assembly name (package name). */
+  readonly assemblyName: string;
+  /** Default stability for the package. */
+  readonly defaultStability?: spec.Stability;
+  /** Whether to strip deprecated members (cdk-build.stripDeprecated). */
+  readonly stripDeprecated?: boolean;
+  /** Optional allowlist file of FQNs to strip (one per line). */
+  readonly stripDeprecatedAllowListFile?: string;
+}
+
+interface RegisteredType {
+  readonly name: string;
+  readonly sym: any;
+  readonly decl: any;
+  readonly fqn: string;
+}
+
+/**
+ * Reproduces the subset of jsii's assembly generation needed for normal-path
+ * `.jsii` parity, over the TS7 API.
+ */
+export class Ts7Assembler {
+  private readonly np: NativePreview;
+  private readonly checker: any;
+  private readonly program: any;
+  private readonly project: Ts7Project;
+
+  private readonly root: string;
+  private readonly assemblyName: string;
+  private readonly entry: string;
+  private readonly defaultStability?: spec.Stability;
+  private currentStability?: spec.Stability;
+
+  private readonly types: Record<string, spec.Type> = {};
+  private readonly submodules: Record<string, unknown> = {};
+  private readonly typeFqnBySymbolId = new Map<unknown, string>();
+  private readonly exported: RegisteredType[] = [];
+
+  // external dependency assemblies (peerDependencies): name -> Set(type names)
+  private readonly externalDeps = new Map<string, Set<string>>();
+  private readonly stripDeprecated: boolean;
+  private stripAllowList?: Set<string>;
+
+  public constructor(np: NativePreview, project: Ts7Project, private readonly options: Ts7AssemblerOptions) {
+    this.np = np;
+    this.project = project;
+    this.program = project.program;
+    this.checker = project.checker;
+    this.root = options.projectRoot;
+    this.assemblyName = options.assemblyName;
+    this.entry = options.entry;
+    this.defaultStability = options.defaultStability;
+    this.currentStability = options.defaultStability;
+    this.stripDeprecated = !!options.stripDeprecated;
+
+    if (options.stripDeprecatedAllowListFile && fs.existsSync(options.stripDeprecatedAllowListFile)) {
+      this.stripAllowList = new Set(
+        fs
+          .readFileSync(options.stripDeprecatedAllowListFile, 'utf8')
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean),
+      );
+    }
+  }
+
+  /**
+   * Build the assembly. Mirrors strada `Assembler.emit()`'s high-level flow:
+   * load dependency assemblies, walk module exports, register types, visit each.
+   */
+  public assemble(): spec.Assembly {
+    this._loadDependencyAssemblies();
+
+    const entrySf = this.program.getSourceFile(this.entry);
+    if (!entrySf) {
+      throw new Error(`ts7: entrypoint not found: ${this.entry}`);
+    }
+    const moduleSymbol = this.checker.getSymbolAtLocation(entrySf);
+    const moduleExports = this.checker.getExportsOfModule(moduleSymbol);
+
+    this._registerModuleExports(moduleExports);
+
+    for (const { name, sym, decl, fqn } of this.exported) {
+      this._visitNode(name, sym, decl, fqn);
+    }
+
+    return this._buildAssembly();
+  }
+
+  // -------------------------------------------------------------------------
+  // symbol / alias helpers
+  // -------------------------------------------------------------------------
+
+  private _resolveAlias(sym: any): any {
+    const { SymbolFlags } = this.np;
+    let s = sym;
+    while ((s.flags & SymbolFlags.Alias) !== 0) {
+      s = this.checker.getAliasedSymbol(s);
+    }
+    return s;
+  }
+
+  private _isInternal(sym: any): boolean {
+    return sym.getJsDocTags(this.checker).some((t: any) => t.name === 'internal') || sym.name.startsWith('_');
+  }
+
+  private _isDeprecated(sym: any): boolean {
+    return sym.getJsDocTags(this.checker).some((t: any) => t.name === 'deprecated');
+  }
+
+  private _shouldStrip(sym: any, fqn: string): boolean {
+    if (!this.stripDeprecated || !this._isDeprecated(sym)) {
+      return false;
+    }
+    if (!this.stripAllowList) {
+      return true;
+    }
+    return this.stripAllowList.has(fqn);
+  }
+
+  // -------------------------------------------------------------------------
+  // external (peer-dependency) assembly resolution
+  // -------------------------------------------------------------------------
+
+  private _loadDependencyAssemblies(): void {
+    const pkg = this.options.packageJson;
+    for (const dep of Object.keys(pkg.peerDependencies ?? {})) {
+      try {
+        const req = createRequire(path.join(this.root, 'package.json'));
+        const depDir = path.dirname(req.resolve(`${dep}/package.json`));
+        let depJsii = JSON.parse(fs.readFileSync(path.join(depDir, '.jsii'), 'utf8'));
+        if (depJsii.schema === 'jsii/file-redirect') {
+          depJsii = JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(depDir, depJsii.filename))).toString('utf8'));
+        }
+        this.externalDeps.set(
+          dep,
+          new Set(Object.keys(depJsii.types ?? {}).map((f) => f.slice(depJsii.name.length + 1))),
+        );
+      } catch {
+        /* not a jsii dependency */
+      }
+    }
+  }
+
+  private _externalFqnOf(sym: any): string | undefined {
+    const decl0 = sym.declarations?.[0];
+    if (!decl0) {
+      return undefined;
+    }
+    const file = decl0.path ?? '';
+    const m = /node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(file);
+    if (!m) {
+      return undefined;
+    }
+    const dep = m[1];
+    if (!this.externalDeps.has(dep)) {
+      return undefined;
+    }
+    if (this.externalDeps.get(dep)!.has(sym.name)) {
+      return `${dep}.${sym.name}`;
+    }
+    return undefined;
+  }
+
+  // -------------------------------------------------------------------------
+  // module walk + type registration (strada: _registerNamespaces / _visitNode)
+  // -------------------------------------------------------------------------
+
+  private _registerModuleExports(moduleExports: any[]): void {
+    const { SyntaxKind, SymbolFlags } = this.np;
+    const candidates = new Map<unknown, Array<{ name: string; prefix: string; moduleDir: string; sym: any }>>();
+    const visitedModules = new Set<string>();
+
+    const collect = (mExports: any[], prefix: string, moduleDir: string): void => {
+      for (const e of mExports) {
+        const sym = this._resolveAlias(e);
+        const declH = sym.declarations?.[0];
+        if (!declH) {
+          continue;
+        }
+        const kind = declH.kind;
+        if (
+          [SyntaxKind.ClassDeclaration, SyntaxKind.InterfaceDeclaration, SyntaxKind.EnumDeclaration].includes(kind)
+        ) {
+          const nm = /node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(declH.path ?? '');
+          if (nm && this.externalDeps.has(nm[1])) {
+            continue; // peer-dependency type: referenced externally, not owned
+          }
+          if (!candidates.has(sym.id)) {
+            candidates.set(sym.id, []);
+          }
+          candidates.get(sym.id)!.push({ name: e.name, prefix, moduleDir, sym });
+        } else if (
+          kind === SyntaxKind.SourceFile ||
+          (sym.flags & SymbolFlags.ValueModule) !== 0 ||
+          (sym.flags & SymbolFlags.NamespaceModule) !== 0
+        ) {
+          const subFqn = `${prefix}.${e.name}`;
+          const key = `${sym.id}:${subFqn}`;
+          if (visitedModules.has(key)) {
+            continue;
+          }
+          visitedModules.add(key);
+          if (prefix === this.assemblyName) {
+            this.submodules[subFqn] = {};
+          }
+          const subDir = path.dirname(sym.declarations?.[0]?.path ?? moduleDir);
+          collect(this.checker.getExportsOfModule(sym), subFqn, subDir);
+        }
+      }
+    };
+    collect(moduleExports, this.assemblyName, path.dirname(this.entry));
+
+    // FQN attribution: a type is owned by the shortest module path that contains
+    // its declaration (mirrors assembler-lite's "best candidate" selection).
+    for (const [, cands] of candidates) {
+      let best = cands[0];
+      let bestLen = -1;
+      for (const c of cands) {
+        const declPath = c.sym.declarations?.[0]?.path ?? '';
+        const dir = c.moduleDir.endsWith('/') ? c.moduleDir : c.moduleDir + '/';
+        const len = declPath.startsWith(dir) ? dir.length : -1;
+        if (len > bestLen) {
+          bestLen = len;
+          best = c;
+        }
+      }
+      this._registerType(best.sym, best.name, `${best.prefix}.${best.name}`);
+    }
+  }
+
+  private _registerType(sym: any, name: string, fqn: string): void {
+    const { SyntaxKind } = this.np;
+    if (this.typeFqnBySymbolId.has(sym.id)) {
+      return;
+    }
+    if (this._isInternal(sym) || this._shouldStrip(sym, fqn)) {
+      return;
+    }
+    const decl = sym.declarations?.[0]?.resolve(this.project);
+    if (!decl) {
+      return;
+    }
+    this.typeFqnBySymbolId.set(sym.id, fqn);
+    this.exported.push({ name, sym, decl, fqn });
+
+    // nested exported types (namespaces on a class/interface)
+    const nested = sym.getExports?.();
+    if (nested && nested.size) {
+      for (const [, nsym0] of nested) {
+        const nsym = this._resolveAlias(nsym0);
+        const nDeclH = nsym.declarations?.[0];
+        if (!nDeclH) {
+          continue;
+        }
+        if (
+          [SyntaxKind.ClassDeclaration, SyntaxKind.InterfaceDeclaration, SyntaxKind.EnumDeclaration].includes(
+            nDeclH.kind,
+          )
+        ) {
+          this._registerType(nsym, nsym.name, `${fqn}.${nsym.name}`);
+        }
+      }
+    }
+  }
+
+  private _symbolIdOf(sym: any): string | undefined {
+    const tsFqn = this.checker.getFullyQualifiedName(sym); // e.g. "/abs/path/src/construct".Construct
+    const m = /^"([^"]+)"(?:\.(.*))?$/.exec(tsFqn);
+    if (!m) {
+      return undefined;
+    }
+    let rel: string;
+    const nm = m[1].lastIndexOf('node_modules/');
+    if (nm >= 0) {
+      const after = m[1].slice(nm + 'node_modules/'.length);
+      rel = after
+        .split('/')
+        .slice(after.startsWith('@') ? 2 : 1)
+        .join('/');
+    } else {
+      rel = path.relative(this.root, m[1]);
+    }
+    return `${rel}:${m[2] ?? ''}`;
+  }
+
+  // -------------------------------------------------------------------------
+  // per-type dispatch (strada: _visitNode)
+  // -------------------------------------------------------------------------
+
+  private _visitNode(name: string, sym: any, decl: any, fqn: string): void {
+    const { SyntaxKind } = this.np;
+    const jsiiType: any = {
+      assembly: this.assemblyName,
+      fqn,
+      kind: '',
+      locationInModule: this._locationOf(decl),
+      name,
+    };
+    const docs = this._visitDocumentation(sym);
+    if (docs) {
+      jsiiType.docs = docs;
+    }
+    this.currentStability = docs?.stability ?? this.defaultStability;
+    this._withDefaultDocs(jsiiType);
+    const symbolId = this._symbolIdOf(sym);
+    if (symbolId) {
+      jsiiType.symbolId = symbolId;
+    }
+
+    if (decl.kind === SyntaxKind.EnumDeclaration) {
+      this._visitEnum(sym, fqn, jsiiType);
+    } else if (decl.kind === SyntaxKind.InterfaceDeclaration) {
+      this._visitInterface(sym, decl, name, jsiiType);
+    } else {
+      this._visitClass(sym, decl, jsiiType);
+    }
+    this.types[fqn] = jsiiType as spec.Type;
+  }
+
+  private _visitEnum(sym: any, fqn: string, jsiiType: any): void {
+    const { SyntaxKind } = this.np;
+    jsiiType.kind = 'enum';
+    const members: any[] = [];
+    for (const [, msym] of sym.getExports()) {
+      if (msym.declarations?.[0]?.kind !== SyntaxKind.EnumMember) {
+        continue;
+      }
+      if (this._isInternal(msym) || this._shouldStrip(msym, `${fqn}#${msym.name}`)) {
+        continue;
+      }
+      const member: any = { name: msym.name };
+      const md = this._visitDocumentation(msym);
+      if (md) {
+        member.docs = md;
+      }
+      members.push(this._withDefaultDocs(member));
+    }
+    jsiiType.members = members;
+  }
+
+  private _visitInterface(sym: any, decl: any, name: string, jsiiType: any): void {
+    const { SyntaxKind, SymbolFlags } = this.np;
+    jsiiType.kind = 'interface';
+    const type = this.checker.getTypeAtLocation(decl);
+    const bases = (type.getBaseTypes() ?? [])
+      .map((b: any) => {
+        const s = b.getSymbol();
+        return s && (this.typeFqnBySymbolId.get(s.id) ?? this._externalFqnOf(s));
+      })
+      .filter(Boolean);
+    if (bases.length) {
+      jsiiType.interfaces = bases;
+    }
+    this._visitMembers(sym, decl, jsiiType, true);
+
+    const allProps = this.checker.getPropertiesOfType(type).filter((p: any) => !this._isInternal(p));
+    const hasMethod = allProps.some((p: any) => (p.flags & SymbolFlags.Method) !== 0);
+    const allReadonly = allProps.every((p: any) => {
+      const d0 = p.declarations?.[0]?.resolve(this.project);
+      if (!d0) {
+        return true;
+      }
+      return (d0.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.ReadonlyKeyword) || d0.kind === SyntaxKind.GetAccessor;
+    });
+    // datatype (struct) heuristic: no methods, all-readonly, and not a behavioral
+    // interface (name like `IFoo`).
+    if (!hasMethod && allReadonly && !/^I[A-Z][a-z]/.test(name)) {
+      jsiiType.datatype = true;
+    }
+  }
+
+  private _visitClass(sym: any, decl: any, jsiiType: any): void {
+    const { SyntaxKind } = this.np;
+    jsiiType.kind = 'class';
+    const mods = decl.modifiers ?? [];
+    if (mods.some((x: any) => x.kind === SyntaxKind.AbstractKeyword)) {
+      jsiiType.abstract = true;
+    }
+
+    // heritage (base class + implemented interfaces), flattening erased/local bases
+    const base: { value?: string } = {};
+    const interfaces = new Set<string>();
+    const collectHeritage = (classDecl: any): void => {
+      for (const h of classDecl.heritageClauses ?? []) {
+        const isExt = h.token === SyntaxKind.ExtendsKeyword;
+        for (const t of h.types) {
+          const s0 = this.checker.getSymbolAtLocation(t.expression);
+          const s = s0 ? this._resolveAlias(s0) : undefined;
+          if (!s) {
+            continue;
+          }
+          const fqnRef = this.typeFqnBySymbolId.get(s.id) ?? this._externalFqnOf(s);
+          if (isExt) {
+            if (fqnRef) {
+              base.value ??= fqnRef;
+            } else {
+              const d0 = s.declarations?.[0]?.resolve(this.project);
+              if (d0 && (d0.kind === SyntaxKind.ClassDeclaration || d0.kind === SyntaxKind.InterfaceDeclaration)) {
+                collectHeritage(d0);
+              }
+            }
+          } else if (fqnRef) {
+            interfaces.add(fqnRef);
+          } else {
+            const d0 = s.declarations?.[0]?.resolve(this.project);
+            if (d0 && d0.kind === SyntaxKind.InterfaceDeclaration) {
+              collectHeritage(d0);
+            }
+          }
+        }
+      }
+    };
+    collectHeritage(decl);
+    if (base.value) {
+      jsiiType.base = base.value;
+    }
+    if (interfaces.size) {
+      jsiiType.interfaces = [...interfaces];
+    }
+
+    // initializer (constructor)
+    const ctor = decl.members?.find((m: any) => m.kind === SyntaxKind.Constructor);
+    const ctorPrivate = ctor && (ctor.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.PrivateKeyword);
+    if (ctorPrivate) {
+      // private constructor: jsii omits the initializer
+    } else if (ctor) {
+      const sig = this.checker.getSignatureFromDeclaration(ctor);
+      const initializer: any = { locationInModule: this._locationOf(ctor) };
+      if (sig) {
+        const params = sig.getParameters().map((p: any) => this._visitParameter(p));
+        if (params.length) {
+          initializer.parameters = params;
+        }
+        if (params.some((p: any) => p.variadic)) {
+          initializer.variadic = true;
+        }
+      }
+      if ((ctor.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.ProtectedKeyword)) {
+        initializer.protected = true;
+      }
+      jsiiType.initializer = this._withDefaultDocs(initializer);
+    } else {
+      const init: any = {};
+      if (this.defaultStability) {
+        init.docs = { stability: this.defaultStability };
+      }
+      jsiiType.initializer = init;
+    }
+
+    this._visitMembers(sym, decl, jsiiType, false);
+  }
+
+  // -------------------------------------------------------------------------
+  // members (strada: _visitProperty / _visitMethod live under this)
+  // -------------------------------------------------------------------------
+
+  private _visitMembers(sym: any, decl: any, jsiiType: any, isInterface: boolean): void {
+    const { SyntaxKind, SymbolFlags } = this.np;
+    const type = this.checker.getTypeAtLocation(decl);
+    const props: any[] = [];
+    const methods: any[] = [];
+
+    for (const p of this.checker.getPropertiesOfType(type)) {
+      if (this._isInternal(p)) {
+        continue;
+      }
+      if (this._shouldStrip(p, `${jsiiType.fqn}#${p.name}`)) {
+        continue;
+      }
+      const pDecl = p.declarations?.[0]?.resolve(this.project);
+      if (!pDecl) {
+        continue;
+      }
+      if ((pDecl.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.PrivateKeyword)) {
+        continue;
+      }
+      const isParamProp = pDecl.kind === SyntaxKind.Parameter;
+      const owner = isParamProp ? pDecl.parent?.parent : pDecl.parent;
+      if (owner !== decl) {
+        const ownerSym = owner?.name ? this.checker.getSymbolAtLocation(owner.name) : undefined;
+        const pfqn = ownerSym && (this.typeFqnBySymbolId.get(ownerSym.id) ?? this._externalFqnOf(ownerSym));
+        if (pfqn) {
+          continue; // declared on an exported/foreign base: not re-listed
+        }
+      }
+      if ((p.flags & SymbolFlags.Method) !== 0) {
+        const m = this._visitMethod(p, pDecl, false);
+        if (isInterface) {
+          m.abstract = true;
+        }
+        methods.push(m);
+      } else {
+        const pr = this._visitProperty(p, pDecl, false);
+        if (isInterface) {
+          pr.abstract = true;
+        }
+        props.push(pr);
+      }
+    }
+
+    if (!isInterface) {
+      const staticType = this.checker.getTypeOfSymbol(sym);
+      for (const sp of staticType ? this.checker.getPropertiesOfType(staticType) : []) {
+        if (sp.name === 'prototype' || this._isInternal(sp)) {
+          continue;
+        }
+        if (this._shouldStrip(sp, `${jsiiType.fqn}#${sp.name}`)) {
+          continue;
+        }
+        const spDecl = sp.declarations?.[0]?.resolve(this.project);
+        if (!spDecl || spDecl.parent !== decl) {
+          continue;
+        }
+        if ((spDecl.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.PrivateKeyword)) {
+          continue;
+        }
+        if ((sp.flags & SymbolFlags.Method) !== 0) {
+          methods.push(this._visitMethod(sp, spDecl, true));
+        } else {
+          props.push(this._visitProperty(sp, spDecl, true));
+        }
+      }
+    }
+
+    if (props.length) {
+      jsiiType.properties = props.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    if (methods.length) {
+      jsiiType.methods = methods.sort((a, b) => a.name.localeCompare(b.name));
+    }
+  }
+
+  private _visitMethod(msym: any, decl: any, isStatic: boolean): any {
+    const { SyntaxKind } = this.np;
+    const sig = this.checker.getSignatureFromDeclaration(decl);
+    const m: any = { locationInModule: this._locationOf(decl), name: msym.name };
+    if (isStatic) {
+      m.static = true;
+    }
+    const mods = decl.modifiers ?? [];
+    if (mods.some((x: any) => x.kind === SyntaxKind.AbstractKeyword)) {
+      m.abstract = true;
+    }
+    if (mods.some((x: any) => x.kind === SyntaxKind.ProtectedKeyword)) {
+      m.protected = true;
+    }
+    if (sig) {
+      const params = sig.getParameters().map((p: any) => this._visitParameter(p));
+      if (params.length) {
+        m.parameters = params;
+      }
+      if (params.some((p: any) => p.variadic)) {
+        m.variadic = true;
+      }
+      const opt: { optional?: boolean } = {};
+      const ret = this._typeReference(this.checker.getReturnTypeOfSignature(sig), opt, decl.type);
+      if (ret) {
+        m.returns = opt.optional ? { optional: true, type: ret } : { type: ret };
+      }
+    }
+    const d = this._visitDocumentation(msym);
+    if (d) {
+      m.docs = d;
+    }
+    return this._withDefaultDocs(m);
+  }
+
+  private _visitProperty(psym: any, decl: any, isStatic: boolean): any {
+    const { SyntaxKind } = this.np;
+    const t = this.checker.getTypeOfSymbolAtLocation(psym, decl);
+    const opt: { optional?: boolean } = {};
+    const p: any = { locationInModule: this._locationOf(decl), name: psym.name, type: this._typeReference(t, opt, decl.type) };
+    const mods = decl.modifiers ?? [];
+    const hasSetter = psym.declarations?.some((h: any) => h.kind === SyntaxKind.SetAccessor);
+    if (mods.some((x: any) => x.kind === SyntaxKind.ReadonlyKeyword) || (decl.kind === SyntaxKind.GetAccessor && !hasSetter)) {
+      p.immutable = true;
+    }
+    if (mods.some((x: any) => x.kind === SyntaxKind.ProtectedKeyword)) {
+      p.protected = true;
+    }
+    if (mods.some((x: any) => x.kind === SyntaxKind.AbstractKeyword)) {
+      p.abstract = true;
+    }
+    if (isStatic) {
+      p.static = true;
+      if (mods.some((x: any) => x.kind === SyntaxKind.ReadonlyKeyword)) {
+        p.const = true;
+      }
+    }
+    const q = decl.questionToken ?? (decl.postfixToken?.kind === SyntaxKind.QuestionToken ? decl.postfixToken : undefined);
+    if (q != null || opt.optional) {
+      p.optional = true;
+    }
+    const d = this._visitDocumentation(psym);
+    if (d) {
+      p.docs = d;
+    }
+    return this._withDefaultDocs(p);
+  }
+
+  private _visitParameter(prm: any): any {
+    const decl = prm.declarations?.[0]?.resolve(this.project);
+    const t = decl ? this.checker.getTypeOfSymbolAtLocation(prm, decl) : undefined;
+    const opt: { optional?: boolean } = {};
+    const p: any = { name: prm.name, type: this._typeReference(t, opt, decl?.type) };
+    if (decl?.dotDotDotToken) {
+      p.variadic = true;
+      p.type = p.type?.collection?.elementtype ?? p.type;
+    } else if (decl?.questionToken != null || decl?.initializer != null || opt.optional) {
+      p.optional = true;
+    }
+    const d = this._visitDocumentation(prm);
+    if (d) {
+      p.docs = d;
+    }
+    return p;
+  }
+
+  // -------------------------------------------------------------------------
+  // type references (strada: _typeReference / _optionalValue)
+  // -------------------------------------------------------------------------
+
+  private _unionNodeOf(typeNode: any): any {
+    const { SyntaxKind } = this.np;
+    if (!typeNode) {
+      return undefined;
+    }
+    if (typeNode.kind === SyntaxKind.UnionType) {
+      return typeNode;
+    }
+    if (typeNode.kind === SyntaxKind.TypeReference) {
+      const s0 = this.checker.getSymbolAtLocation(typeNode.typeName);
+      const s = s0 ? this._resolveAlias(s0) : undefined;
+      const d = s?.declarations?.[0]?.resolve(this.project);
+      if (d?.kind === SyntaxKind.TypeAliasDeclaration && d.type?.kind === SyntaxKind.UnionType) {
+        return d.type;
+      }
+    }
+    return undefined;
+  }
+
+  private _typeReference(type: any, optionalOut?: { optional?: boolean }, typeNode?: any): any {
+    const { TypeFlags } = this.np;
+    if (!type) {
+      return { primitive: 'any' };
+    }
+    const f = type.flags;
+    if (f & TypeFlags.EnumLike) {
+      const s = type.getSymbol();
+      const parent = s?.getParent();
+      const fqn =
+        s &&
+        (this.typeFqnBySymbolId.get(s.id) ??
+          this._externalFqnOf(s) ??
+          (parent && (this.typeFqnBySymbolId.get(parent.id) ?? this._externalFqnOf(parent))));
+      if (fqn) {
+        return { fqn };
+      }
+    }
+    if (f & TypeFlags.NonPrimitive) {
+      return { primitive: 'json' };
+    }
+    if (f & TypeFlags.StringLike) {
+      return { primitive: 'string' };
+    }
+    if (f & TypeFlags.NumberLike) {
+      return { primitive: 'number' };
+    }
+    if (f & TypeFlags.BooleanLike) {
+      return { primitive: 'boolean' };
+    }
+    if (f & (TypeFlags.Any | TypeFlags.Unknown)) {
+      return { primitive: 'any' };
+    }
+    if (f & TypeFlags.Void) {
+      return undefined;
+    }
+    if (type.isUnionType()) {
+      return this._unionTypeReference(type, optionalOut, typeNode);
+    }
+    if (this.checker.isArrayType(type)) {
+      const args = type.isTypeReference() ? this.checker.getTypeArguments(type) : [];
+      return { collection: { elementtype: this._typeReference(args[0]), kind: 'array' } };
+    }
+    const sym = type.getSymbol();
+    if (sym && sym.name === 'Date' && (sym.declarations?.[0]?.path ?? '').includes('/lib.')) {
+      return { primitive: 'date' };
+    }
+    if (sym) {
+      const target = type.isTypeReference() ? type.getTarget() : type;
+      const tsym = target.getSymbol() ?? sym;
+      const fqn = this.typeFqnBySymbolId.get(tsym.id) ?? this._externalFqnOf(tsym);
+      if (fqn) {
+        return { fqn };
+      }
+    }
+    const indexInfos = this.checker.getIndexInfosOfType(type);
+    if (indexInfos.length) {
+      return { collection: { elementtype: this._typeReference(indexInfos[0].valueType), kind: 'map' } };
+    }
+    return { primitive: 'any' };
+  }
+
+  private _unionTypeReference(type: any, optionalOut?: { optional?: boolean }, typeNode?: any): any {
+    const { TypeFlags } = this.np;
+    const all = type.getTypes();
+    const parts = all.filter((t: any) => !(t.flags & (TypeFlags.Undefined | TypeFlags.Null)));
+    if (optionalOut && parts.length !== all.length) {
+      optionalOut.optional = true;
+    }
+    const un = this._unionNodeOf(typeNode);
+    if (un) {
+      const refs: any[] = [];
+      const seen = new Set<string>();
+      const pushFlat = (r: any): void => {
+        if (!r) {
+          return;
+        }
+        if (r.union) {
+          r.union.types.forEach(pushFlat);
+          return;
+        }
+        const key = JSON.stringify(r);
+        if (!seen.has(key)) {
+          seen.add(key);
+          refs.push(r);
+        }
+      };
+      for (const tn of un.types) {
+        const tt = this.checker.getTypeFromTypeNode(tn);
+        if (tt && tt.flags & (TypeFlags.Undefined | TypeFlags.Null)) {
+          if (optionalOut) {
+            optionalOut.optional = true;
+          }
+          continue;
+        }
+        pushFlat(this._typeReference(tt, optionalOut, tn));
+      }
+      if (refs.length === 1) {
+        return refs[0];
+      }
+      if (refs.length > 1) {
+        return { union: { types: refs } };
+      }
+    }
+    const refs: any[] = [];
+    const seen = new Set<string>();
+    for (const p of parts) {
+      const r = this._typeReference(p, optionalOut);
+      const key = JSON.stringify(r);
+      if (r && !seen.has(key)) {
+        seen.add(key);
+        refs.push(r);
+      }
+    }
+    if (refs.length === 1) {
+      return refs[0];
+    }
+    return { union: { types: refs } };
+  }
+
+  // -------------------------------------------------------------------------
+  // documentation (strada: _visitDocumentation)
+  // -------------------------------------------------------------------------
+
+  private _visitDocumentation(sym: any): any | undefined {
+    const summaryRaw = sym.getDocumentationComment(this.checker);
+    const docs: any = {};
+    if (summaryRaw) {
+      const text = typeof summaryRaw === 'string' ? summaryRaw.trim() : String(summaryRaw).trim();
+      const { summary, remarks } = this._splitSummary(text);
+      if (remarks) {
+        docs.remarks = remarks;
+      }
+      docs.summary = summary;
+    }
+    for (const tag of sym.getJsDocTags(this.checker)) {
+      let tagText =
+        typeof tag.text === 'string' ? tag.text : (tag.text ?? []).map((p: any) => p.text).join('');
+      tagText = tagText.replace(/\{@link\s+([^}]*?)\s*\}/g, '{@link $1 }');
+      switch (tag.name) {
+        case 'default':
+          docs.default = tagText.trim();
+          break;
+        case 'deprecated':
+          docs.deprecated = tagText.trim();
+          docs.stability = 'deprecated';
+          break;
+        case 'stability':
+          docs.stability = tagText.trim();
+          break;
+        case 'example':
+          docs.example = tagText.replace(/^\n/, '');
+          break;
+        case 'returns':
+          docs.returns = tagText.trim();
+          break;
+        case 'see':
+          docs.see = tagText.trim();
+          break;
+        default:
+          break;
+      }
+    }
+    return Object.keys(docs).length ? docs : undefined;
+  }
+
+  /** Split a doc comment into the first-sentence summary and the remainder. */
+  private _splitSummary(text: string): { summary: string; remarks?: string } {
+    let splitAt = -1;
+    let paren = 0;
+    let tick = false;
+    for (let i = 0; i < text.length - 1; i++) {
+      const ch = text[i];
+      if (ch === '`') {
+        tick = !tick;
+      } else if (!tick && (ch === '(' || ch === '[')) {
+        paren++;
+      } else if (!tick && (ch === ')' || ch === ']')) {
+        paren = Math.max(0, paren - 1);
+      } else if (ch === '.' && !tick && paren === 0 && /\s/.test(text[i + 1])) {
+        const before = text.slice(Math.max(0, i - 3), i).toLowerCase();
+        if (before.endsWith('e.g') || before.endsWith('i.e') || before.endsWith('etc')) {
+          continue;
+        }
+        splitAt = i;
+        break;
+      }
+    }
+    const summaryRaw = splitAt >= 0 ? text.slice(0, splitAt + 1) : text;
+    const rest = splitAt >= 0 ? text.slice(splitAt + 1).trim() : '';
+    const summary = summaryRaw
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/(?<![.!?])$/, '.');
+    return { summary, remarks: rest || undefined };
+  }
+
+  private _withDefaultDocs(obj: any): any {
+    if (!this.currentStability) {
+      return obj;
+    }
+    if (!obj.docs) {
+      obj.docs = { stability: this.currentStability };
+    } else if (!obj.docs.stability) {
+      obj.docs.stability = this.currentStability;
+    }
+    return obj;
+  }
+
+  private _locationOf(decl: any): spec.SourceLocation {
+    const sf = decl.getSourceFile();
+    const { line } = sf.getLineAndCharacterOfPosition(decl.getStart(sf));
+    return { filename: path.relative(this.root, sf.fileName), line: line + 1 };
+  }
+
+  // -------------------------------------------------------------------------
+  // assembly header assembly (strada: emit() tail)
+  // -------------------------------------------------------------------------
+
+  private _buildAssembly(): spec.Assembly {
+    const pkg = this.options.packageJson;
+    const dependencies: Record<string, string> = {};
+    for (const [dep] of this.externalDeps) {
+      const v = (pkg.dependencies ?? {})[dep] ?? (pkg.peerDependencies ?? {})[dep];
+      if (v) {
+        dependencies[dep] = v;
+      }
+    }
+
+    const assembly: any = {
+      author: pkg.author ?? {},
+      ...(Object.keys(dependencies).length ? { dependencies } : {}),
+      ...(Object.keys(this.submodules).length ? { submodules: this.submodules } : {}),
+      description: pkg.description ?? this.assemblyName,
+      homepage: pkg.homepage,
+      jsiiVersion: 'ts7-backend-phase1 (experimental)',
+      license: pkg.license,
+      name: this.assemblyName,
+      repository: pkg.repository,
+      schema: 'jsii/0.10.0',
+      types: this.types,
+      version: pkg.version,
+    };
+    return assembly as spec.Assembly;
+  }
+}
