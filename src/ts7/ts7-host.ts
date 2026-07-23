@@ -63,10 +63,17 @@ export class Ts7Host {
 
   /** Dispose the snapshot and close the API session / tsgo process. */
   public close(): void {
+    // Tolerate a channel that is already gone (e.g. the tsgo process exited):
+    // dispose/close can throw EPIPE, which must not mask the real result.
     try {
       this.snapshot.dispose();
-    } finally {
+    } catch {
+      /* ignore */
+    }
+    try {
       this.api.close();
+    } catch {
+      /* ignore */
     }
   }
 }

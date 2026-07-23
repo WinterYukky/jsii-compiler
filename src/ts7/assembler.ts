@@ -428,6 +428,7 @@ export class Ts7Assembler {
     const erasedBases: any[] = [];
     const interfaces: string[] = [];
     const seen = new Set<string>();
+    const visitedErased = new Set<unknown>();
     if (!baseTypes) {
       return { interfaces, erasedBases };
     }
@@ -445,6 +446,13 @@ export class Ts7Assembler {
         }
         // Not an exported/foreign type: erase it and descend into its own bases,
         // so its public ancestors surface and its members get re-listed here.
+        // Guard against heritage cycles / repeated visits (RPC-cost + safety).
+        if (s && s.id != null) {
+          if (visitedErased.has(s.id)) {
+            continue;
+          }
+          visitedErased.add(s.id);
+        }
         erasedBases.push(iface);
         const bases = iface.getBaseTypes?.();
         if (bases && bases.length) {

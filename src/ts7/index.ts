@@ -92,12 +92,22 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
 
     const assembly = assembler.assemble();
 
-    // Emit JS/d.ts via getEmitOutput and inject jsii rtti (post-emit pass).
-    const { emittedFiles } = runTs7EmitPipeline(project, { projectRoot, assembly });
-
-    // Reuse @jsii/spec's writer so the on-disk format (incl. the compressed
-    // file-redirect variant) is byte-for-byte compatible with the strada path.
+    // Write the assembly first (the parity artifact), reusing @jsii/spec's writer
+    // so the on-disk format (incl. the compressed file-redirect variant) is
+    // byte-for-byte compatible with the strada path.
     writeAssembly(projectRoot, fingerprint(assembly), { compress: options.compressAssembly ?? false });
+
+    // Then emit JS/d.ts via getEmitOutput and inject jsii rtti (post-emit pass).
+    // Emit is best-effort: a failure here (e.g. an unstable out-of-process tsgo
+    // session on a very large project) must not discard the assembly we already
+    // produced.
+    let emittedFiles: string[] = [];
+    try {
+      ({ emittedFiles } = runTs7EmitPipeline(project, { projectRoot, assembly }));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`ts7 backend: emit pipeline failed (assembly was still written): ${(err as Error).message}`);
+    }
 
     return { assembly, typeCount: Object.keys(assembly.types ?? {}).length, emittedFiles };
   } finally {
