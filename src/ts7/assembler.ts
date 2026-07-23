@@ -218,6 +218,46 @@ export class Ts7Assembler {
     return `${d0.path}:${d0.index}`;
   }
 
+  /**
+   * Batch-prefetch JSDoc tags + doc comments for many symbols in one RPC
+   * (getSymbolDocumentations, Phase 2E), filling the same caches that
+   * _jsDocTags/_docComment consult. Per-element results are exactly what the
+   * individual calls would return, so behaviour is unchanged — only the number
+   * of round-trips drops (~302k doc RPCs -> ~1 per type on aws-cdk-lib).
+   * No-ops gracefully when the toolchain lacks the batched endpoint.
+   */
+  private _prefetchDocs(syms: any[]): void {
+    if (typeof this.checker.getSymbolDocumentations !== 'function') {
+      return;
+    }
+    const wanted: any[] = [];
+    const keys: string[] = [];
+    const seen = new Set<string>();
+    for (const sym of syms) {
+      if (!sym) {
+        continue;
+      }
+      const key = this._symbolDocKey(sym);
+      if (!key || seen.has(key) || (this._jsDocTagsCache.has(key) && this._docCommentCache.has(key))) {
+        continue;
+      }
+      seen.add(key);
+      wanted.push(sym);
+      keys.push(key);
+    }
+    const CHUNK = 1000;
+    for (let i = 0; i < wanted.length; i += CHUNK) {
+      const chunk = wanted.slice(i, i + CHUNK);
+      const docs = this.checker.getSymbolDocumentations(chunk);
+      for (let j = 0; j < chunk.length; j++) {
+        const key = keys[i + j];
+        const d = docs[j] ?? { tags: [], comment: '' };
+        this._jsDocTagsCache.set(key, d.tags ?? []);
+        this._docCommentCache.set(key, (d.comment ?? '') === '' ? null : d.comment);
+      }
+    }
+  }
+
   private _shouldStrip(sym: any, fqn: string): boolean {
     if (!this.stripDeprecated || !this._isDeprecated(sym)) {
       return false;
@@ -323,6 +363,7 @@ export class Ts7Assembler {
 
     // FQN attribution: a type is owned by the shortest module path that contains
     // its declaration (mirrors assembler-lite's "best candidate" selection).
+    const bests: Array<{ sym: any; name: string; fqn: string }> = [];
     for (const [, cands] of candidates) {
       let best = cands[0];
       let bestLen = -1;
@@ -335,7 +376,13 @@ export class Ts7Assembler {
           best = c;
         }
       }
-      this._registerType(best.sym, best.name, `${best.prefix}.${best.name}`);
+      bests.push({ sym: best.sym, name: best.name, fqn: `${best.prefix}.${best.name}` });
+    }
+    // Batch-prefetch docs for all candidate type symbols (used by the
+    // isInternal/shouldStrip checks inside _registerType).
+    this._prefetchDocs(bests.map((b) => b.sym));
+    for (const b of bests) {
+      this._registerType(b.sym, b.name, b.fqn);
     }
   }
 
@@ -432,7 +479,12 @@ export class Ts7Assembler {
     const { SyntaxKind } = this.np;
     jsiiType.kind = 'enum';
     const members: any[] = [];
-    for (const [, msym] of sym.getExports()) {
+    const enumMembers: any[] = [];
+    for (const [, m] of sym.getExports()) {
+      enumMembers.push(m);
+    }
+    this._prefetchDocs(enumMembers);
+    for (const msym of enumMembers) {
       if (msym.declarations?.[0]?.kind !== SyntaxKind.EnumMember) {
         continue;
       }
@@ -674,7 +726,13 @@ export class Ts7Assembler {
       }
     }
 
-    for (const p of this.checker.getPropertiesOfType(type)) {
+    const instanceProps = this.checker.getPropertiesOfType(type);
+    const staticTypeForPrefetch = !isInterface ? this.checker.getTypeOfSymbol(sym) : undefined;
+    const staticPropsForPrefetch = staticTypeForPrefetch ? this.checker.getPropertiesOfType(staticTypeForPrefetch) : [];
+    // One RPC for all member docs of this type (instance + static).
+    this._prefetchDocs([...instanceProps, ...staticPropsForPrefetch]);
+
+    for (const p of instanceProps) {
       if (this._isInternal(p)) {
         continue;
       }
@@ -721,8 +779,7 @@ export class Ts7Assembler {
     }
 
     if (!isInterface) {
-      const staticType = this.checker.getTypeOfSymbol(sym);
-      for (const sp of staticType ? this.checker.getPropertiesOfType(staticType) : []) {
+      for (const sp of staticPropsForPrefetch) {
         if (sp.name === 'prototype' || this._isInternal(sp)) {
           continue;
         }
