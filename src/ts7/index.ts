@@ -127,6 +127,7 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
         // eslint-disable-next-line no-console
         console.error(
           `ts7 timing: requests=${t.totals.requestCount} roundTripMs=${Math.round(t.totals.roundTripMs)} ` +
+            `serverTimeMs=${Math.round(t.totals.serverTimeMs ?? 0)} transportOverheadMs=${Math.round(t.totals.transportOverheadMs ?? 0)} ` +
             `sent=${t.totals.bytesSent} recv=${t.totals.bytesReceived}`,
         );
       }

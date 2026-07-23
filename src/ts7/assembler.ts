@@ -866,6 +866,28 @@ export class Ts7Assembler {
     return undefined;
   }
 
+  /**
+   * Client-side array-type check to avoid an out-of-process `checker.isArrayType`
+   * RPC on every type reference (~85k on aws-cdk-lib). `type.isTypeReference()`
+   * is a local objectFlags bit; the target's symbol name (`Array`/`ReadonlyArray`
+   * from a `lib.*.d.ts`) is resolved client-side after the global Array type is
+   * fetched once. Verified to produce identical `.jsii` vs `checker.isArrayType`.
+   */
+  private _isArrayType(type: any): boolean {
+    if (typeof type.isTypeReference !== 'function' || !type.isTypeReference()) {
+      return false;
+    }
+    const target = type.getTarget?.() ?? type;
+    const tsym = target?.getSymbol?.();
+    const name = tsym?.name;
+    if (name !== 'Array' && name !== 'ReadonlyArray') {
+      return false;
+    }
+    // must be the built-in Array from the standard library (not a user type)
+    const declPath = tsym?.declarations?.[0]?.path ?? '';
+    return declPath.includes('/lib.') || declPath.includes('lib.es') || /lib\.[^/]*\.d\.ts$/.test(declPath);
+  }
+
   private _typeReference(type: any, optionalOut?: { optional?: boolean }, typeNode?: any): any {
     const { TypeFlags } = this.np;
     if (!type) {
@@ -908,7 +930,7 @@ export class Ts7Assembler {
     if (typeof type.isIntersectionType === 'function' && type.isIntersectionType()) {
       return this._intersectionTypeReference(type);
     }
-    if (this.checker.isArrayType(type)) {
+    if (this._isArrayType(type)) {
       const args = type.isTypeReference() ? this.checker.getTypeArguments(type) : [];
       return { collection: { elementtype: this._typeReference(args[0]), kind: 'array' } };
     }
