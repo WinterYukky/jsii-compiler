@@ -401,7 +401,7 @@ synchronous RPCs**. Cumulative: 44.3s (2B start) → 41.5s (2C) → **38.2s (2D)
 3. Ship the 2C input-keyed checker cache and the 2D `writeToDisk` emit option
    (both parity-proven here, byte-identical outputs).
 
-Raw measurement logs: `s3://alphaface-compile-transfer-tmp/lege-tsgo-poc/2d-artifacts.tar.gz`.
+Raw measurement logs are archived off-repo and available on request.
 
 ## Phase 2E — request-count batching (closed): E1 kept, E2 reverted
 

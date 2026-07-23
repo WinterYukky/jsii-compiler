@@ -56,8 +56,10 @@ Three findings:
 
 - **Wins**: small, self-contained, certainly-needed payloads in large batches.
   A batched `getSymbolDocumentations(symbols[])` (per-element identical to the
-  individual `getJsDocTags` + `getDocumentationComment`) replaced ~302k requests
-  with ~20k: **−30% total requests, −2.7s transport**, no parity impact.
+  individual `getJsDocTags` + `getDocumentationComment`) replaced most of ~302k
+  individual doc reads with ~20k batched calls (a ~64k tail on the parameter
+  path remains individual): **−218k total requests (−30%), −2.7s transport**,
+  no parity impact.
 - **Losses**: (a) batching that front-runs lazy evaluation — eagerly prefetching
   member types *before* the consumer's filters ran materialized masses of types
   the lazy path never touched and **regressed wall-clock 38→47-52s** despite

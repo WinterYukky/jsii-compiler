@@ -33,7 +33,9 @@ TS7_DIR="${REPO_ROOT}/.ts7"
 
 TSGO_REPO="${TSGO_REPO:-https://github.com/WinterYukky/typescript-go.git}"
 TSGO_REF="${TSGO_REF:-draft/api-emit-1784711177}"
-S3_CACHE="${S3_CACHE:-s3://alphaface-compile-transfer-tmp/lege-tsgo-poc}"
+# Optional S3 prefix for the toolchain build cache (e.g. s3://my-bucket/prefix).
+# When unset, the toolchain is always built from source and never uploaded.
+S3_CACHE="${S3_CACHE:-}"
 FORCE_BUILD="${FORCE_BUILD:-0}"
 
 log() { printf '\033[36m[ts7-setup]\033[0m %s\n' "$*" >&2; }
@@ -48,7 +50,7 @@ fi
 SHORT="${COMMIT:0:12}"
 CACHE_KEY="${S3_CACHE}/ts7-toolchain-${SHORT}.tar.gz"
 log "toolchain commit=${SHORT}"
-log "cache key=${CACHE_KEY}"
+if [ -n "${S3_CACHE}" ]; then log "cache key=${CACHE_KEY}"; fi
 
 # Fast path: already provisioned locally for this commit (skipped when FORCE_BUILD=1).
 STAMP="${TS7_DIR}/.commit"
@@ -63,7 +65,7 @@ rm -rf "${TS7_DIR}"
 mkdir -p "${TS7_DIR}"
 
 # Try the S3 cache unless a rebuild was explicitly requested.
-if [ "${FORCE_BUILD}" != "1" ] && aws s3 ls "${CACHE_KEY}" >/dev/null 2>&1; then
+if [ -n "${S3_CACHE}" ] && [ "${FORCE_BUILD}" != "1" ] && aws s3 ls "${CACHE_KEY}" >/dev/null 2>&1; then
   log "cache hit — downloading prebuilt toolchain"
   aws s3 cp "${CACHE_KEY}" "${TS7_DIR}/toolchain.tar.gz"
   tar -xzf "${TS7_DIR}/toolchain.tar.gz" -C "${TS7_DIR}"
@@ -108,14 +110,16 @@ done
 echo "${COMMIT}" > "${STAMP}"
 
 # 3) upload to the S3 cache for the next run
-log "packaging toolchain for cache upload ..."
-tar -czf "${TS7_DIR}/toolchain.tar.gz" -C "${TS7_DIR}" tsgo native-preview .commit
-if aws s3 cp "${TS7_DIR}/toolchain.tar.gz" "${CACHE_KEY}"; then
-  log "uploaded toolchain cache to ${CACHE_KEY}"
-else
-  log "WARN: failed to upload cache (continuing anyway)"
+if [ -n "${S3_CACHE}" ]; then
+  log "packaging toolchain for cache upload ..."
+  tar -czf "${TS7_DIR}/toolchain.tar.gz" -C "${TS7_DIR}" tsgo native-preview .commit
+  if aws s3 cp "${TS7_DIR}/toolchain.tar.gz" "${CACHE_KEY}"; then
+    log "uploaded toolchain cache to ${CACHE_KEY}"
+  else
+    log "WARN: failed to upload cache (continuing anyway)"
+  fi
+  rm -f "${TS7_DIR}/toolchain.tar.gz"
 fi
-rm -f "${TS7_DIR}/toolchain.tar.gz"
 rm -rf "${BUILD_DIR}"
 
 log "toolchain ready (built): ${TS7_DIR}"
