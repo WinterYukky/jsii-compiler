@@ -393,14 +393,9 @@ export class Ts7Assembler {
     const { SyntaxKind, SymbolFlags } = this.np;
     jsiiType.kind = 'interface';
     const type = this.checker.getTypeAtLocation(decl);
-    const bases = (type.getBaseTypes() ?? [])
-      .map((b: any) => {
-        const s = b.getSymbol();
-        return s && (this.typeFqnBySymbolId.get(s.id) ?? this._externalFqnOf(s));
-      })
-      .filter(Boolean);
-    if (bases.length) {
-      jsiiType.interfaces = bases;
+    const { interfaces } = this._processBaseInterfaces(type.getBaseTypes());
+    if (interfaces.length) {
+      jsiiType.interfaces = interfaces;
     }
     this._visitMembers(sym, decl, jsiiType, true);
 
@@ -418,6 +413,47 @@ export class Ts7Assembler {
     if (!hasMethod && allReadonly && !/^I[A-Z][a-z]/.test(name)) {
       jsiiType.datatype = true;
     }
+  }
+
+  /**
+   * Flatten a type's base interfaces the way strada's `_processBaseInterfaces`
+   * does: keep public/exported base interfaces as `interfaces` entries, but for
+   * private/internal bases, erase them and recurse into *their* bases (so their
+   * public ancestors surface, and their members get re-listed on this type).
+   *
+   * `getBaseTypes()` alone under-reports for interfaces whose heritage goes
+   * through erased/aliased/multi-`extends` chains — recursion fixes that.
+   */
+  private _processBaseInterfaces(baseTypes?: any[]): { interfaces: string[]; erasedBases: any[] } {
+    const erasedBases: any[] = [];
+    const interfaces: string[] = [];
+    const seen = new Set<string>();
+    if (!baseTypes) {
+      return { interfaces, erasedBases };
+    }
+
+    const process = (types: any[]): void => {
+      for (const iface of types) {
+        const s = iface.getSymbol?.() ?? iface.symbol;
+        const fqn = s && (this.typeFqnBySymbolId.get(s.id) ?? this._externalFqnOf(s));
+        if (fqn) {
+          if (!seen.has(fqn)) {
+            seen.add(fqn);
+            interfaces.push(fqn);
+          }
+          continue;
+        }
+        // Not an exported/foreign type: erase it and descend into its own bases,
+        // so its public ancestors surface and its members get re-listed here.
+        erasedBases.push(iface);
+        const bases = iface.getBaseTypes?.();
+        if (bases && bases.length) {
+          process(bases);
+        }
+      }
+    };
+    process(baseTypes);
+    return { interfaces, erasedBases };
   }
 
   private _visitClass(sym: any, decl: any, jsiiType: any): void {
@@ -471,12 +507,15 @@ export class Ts7Assembler {
 
     // initializer (constructor)
     const ctor = decl.members?.find((m: any) => m.kind === SyntaxKind.Constructor);
-    const ctorPrivate = ctor && (ctor.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.PrivateKeyword);
+    // If the class does not declare its own constructor, jsii uses the effective
+    // (inherited) constructor from the nearest base class that declares one.
+    const effectiveCtor = ctor ?? this._inheritedConstructor(decl);
+    const ctorPrivate = effectiveCtor && (effectiveCtor.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.PrivateKeyword);
     if (ctorPrivate) {
       // private constructor: jsii omits the initializer
-    } else if (ctor) {
-      const sig = this.checker.getSignatureFromDeclaration(ctor);
-      const initializer: any = { locationInModule: this._locationOf(ctor) };
+    } else if (effectiveCtor) {
+      const sig = this.checker.getSignatureFromDeclaration(effectiveCtor);
+      const initializer: any = { locationInModule: this._locationOf(effectiveCtor) };
       if (sig) {
         const params = sig.getParameters().map((p: any) => this._visitParameter(p));
         if (params.length) {
@@ -486,7 +525,7 @@ export class Ts7Assembler {
           initializer.variadic = true;
         }
       }
-      if ((ctor.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.ProtectedKeyword)) {
+      if ((effectiveCtor.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.ProtectedKeyword)) {
         initializer.protected = true;
       }
       jsiiType.initializer = this._withDefaultDocs(initializer);
@@ -499,6 +538,49 @@ export class Ts7Assembler {
     }
 
     this._visitMembers(sym, decl, jsiiType, false);
+  }
+
+  /**
+   * Walk the `extends` chain of a class declaration to find the nearest base
+   * class that declares a constructor, returning that constructor declaration
+   * (or undefined). Reproduces the effective/inherited initializer jsii records
+   * for a subclass that does not declare its own constructor.
+   */
+  private _inheritedConstructor(decl: any): any | undefined {
+    const { SyntaxKind } = this.np;
+    let current = decl;
+    const guard = new Set<any>();
+    while (current) {
+      if (guard.has(current)) {
+        return undefined;
+      }
+      guard.add(current);
+      let nextBase: any;
+      for (const h of current.heritageClauses ?? []) {
+        if (h.token !== SyntaxKind.ExtendsKeyword) {
+          continue;
+        }
+        const t = h.types?.[0];
+        if (!t) {
+          continue;
+        }
+        const s0 = this.checker.getSymbolAtLocation(t.expression);
+        const s = s0 ? this._resolveAlias(s0) : undefined;
+        const baseDecl = s?.declarations?.[0]?.resolve(this.project);
+        if (baseDecl && baseDecl.kind === SyntaxKind.ClassDeclaration) {
+          nextBase = baseDecl;
+        }
+      }
+      if (!nextBase) {
+        return undefined;
+      }
+      const baseCtor = nextBase.members?.find((m: any) => m.kind === SyntaxKind.Constructor);
+      if (baseCtor) {
+        return baseCtor;
+      }
+      current = nextBase;
+    }
+    return undefined;
   }
 
   // -------------------------------------------------------------------------
@@ -729,6 +811,9 @@ export class Ts7Assembler {
     if (type.isUnionType()) {
       return this._unionTypeReference(type, optionalOut, typeNode);
     }
+    if (typeof type.isIntersectionType === 'function' && type.isIntersectionType()) {
+      return this._intersectionTypeReference(type);
+    }
     if (this.checker.isArrayType(type)) {
       const args = type.isTypeReference() ? this.checker.getTypeArguments(type) : [];
       return { collection: { elementtype: this._typeReference(args[0]), kind: 'array' } };
@@ -808,6 +893,32 @@ export class Ts7Assembler {
       return refs[0];
     }
     return { union: { types: refs } };
+  }
+
+  /**
+   * Build an intersection type reference (`A & B`), e.g. jsii models
+   * `IFooRef & IGrantable` as `{ intersection: { types: [...] } }`. Mirrors
+   * strada's `type.isIntersection()` branch: each constituent is turned into a
+   * type reference, deduplicated.
+   */
+  private _intersectionTypeReference(type: any): any {
+    const refs: any[] = [];
+    const seen = new Set<string>();
+    for (const t of type.getTypes()) {
+      const r = this._typeReference(t);
+      if (!r) {
+        continue;
+      }
+      const key = JSON.stringify(r);
+      if (!seen.has(key)) {
+        seen.add(key);
+        refs.push(r);
+      }
+    }
+    if (refs.length === 1) {
+      return refs[0];
+    }
+    return { intersection: { types: refs } };
   }
 
   // -------------------------------------------------------------------------
