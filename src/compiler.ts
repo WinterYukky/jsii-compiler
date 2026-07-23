@@ -138,10 +138,10 @@ export class Compiler implements Emitter {
       compressAssembly: this.options.compressAssembly,
     });
 
-    LOG.info(`ts7 backend: assembled ${result.typeCount} types`);
+    LOG.info(`ts7 backend: assembled ${result.typeCount} types, emitted ${result.emittedFiles.length} files`);
 
     // Phase 1 does not surface jsii diagnostics through this path.
-    return { emitSkipped: false, diagnostics: [], emittedFiles: [] };
+    return { emitSkipped: false, diagnostics: [], emittedFiles: result.emittedFiles };
   }
 
   /**

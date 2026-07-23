@@ -18,6 +18,7 @@ import * as spec from '@jsii/spec';
 import { writeAssembly } from '@jsii/spec';
 
 import { Ts7Assembler } from './assembler';
+import { runTs7EmitPipeline } from './ts7-emit';
 import { Ts7Host } from './ts7-host';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
@@ -41,6 +42,7 @@ export interface Ts7EmitOptions {
 export interface Ts7EmitResult {
   readonly assembly: spec.Assembly;
   readonly typeCount: number;
+  readonly emittedFiles: string[];
 }
 
 /**
@@ -90,11 +92,14 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
 
     const assembly = assembler.assemble();
 
+    // Emit JS/d.ts via getEmitOutput and inject jsii rtti (post-emit pass).
+    const { emittedFiles } = runTs7EmitPipeline(project, { projectRoot, assembly });
+
     // Reuse @jsii/spec's writer so the on-disk format (incl. the compressed
     // file-redirect variant) is byte-for-byte compatible with the strada path.
     writeAssembly(projectRoot, fingerprint(assembly), { compress: options.compressAssembly ?? false });
 
-    return { assembly, typeCount: Object.keys(assembly.types ?? {}).length };
+    return { assembly, typeCount: Object.keys(assembly.types ?? {}).length, emittedFiles };
   } finally {
     host.close();
   }

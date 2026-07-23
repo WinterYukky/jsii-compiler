@@ -80,9 +80,11 @@ fundamental limitation of the TS7 API; each maps to a specific piece of strada's
 
 - **Diagnostics / negative-path** (`JSII_xxxx` codes) — the other half of the
   strada `Assembler`'s value; entirely out of Phase 1 scope.
-- **Emit pipeline**: `getEmitOutput` + rtti/`deprecated-remover`/`deprecation-warnings`
-  post-emit passes (validated in the PoC `emit-demo.sh`, not yet wired into
-  `emitTs7`, which currently writes the assembly only).
+- **Emit pipeline**: `getEmitOutput` + rtti post-emit pass are now wired into
+  `emitTs7` (M5): the ts7 backend writes `.js`/`.d.ts` and injects the
+  `Symbol.for("jsii.rtti")` marker. Still deferred to Phase 2: the
+  **`.warnings.jsii.js` generation** (deprecation-warnings) and the
+  `deprecated-remover` emit surgery (the `.jsii`-side strip is already done).
 - **Watch mode** (snapshot `updateSnapshot({ fileChanges })`).
 - **Assembly header fidelity**: `readme`, `docs`, `jsiiVersion`, `bin`,
   `dependencyClosure`, `metadata`, `usedFeatures`, `contributors`, `keywords`,
