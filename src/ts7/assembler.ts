@@ -393,11 +393,11 @@ export class Ts7Assembler {
     const { SyntaxKind, SymbolFlags } = this.np;
     jsiiType.kind = 'interface';
     const type = this.checker.getTypeAtLocation(decl);
-    const { interfaces } = this._processBaseInterfaces(type.getBaseTypes());
+    const { interfaces, erasedBases } = this._processBaseInterfaces(type.getBaseTypes());
     if (interfaces.length) {
       jsiiType.interfaces = interfaces;
     }
-    this._visitMembers(sym, decl, jsiiType, true);
+    this._visitMembers(sym, decl, jsiiType, true, erasedBases);
 
     const allProps = this.checker.getPropertiesOfType(type).filter((p: any) => !this._isInternal(p));
     const hasMethod = allProps.some((p: any) => (p.flags & SymbolFlags.Method) !== 0);
@@ -475,6 +475,7 @@ export class Ts7Assembler {
     // heritage (base class + implemented interfaces), flattening erased/local bases
     const base: { value?: string } = {};
     const interfaces = new Set<string>();
+    const erasedClassBases: any[] = [];
     const collectHeritage = (classDecl: any): void => {
       for (const h of classDecl.heritageClauses ?? []) {
         const isExt = h.token === SyntaxKind.ExtendsKeyword;
@@ -491,6 +492,7 @@ export class Ts7Assembler {
             } else {
               const d0 = s.declarations?.[0]?.resolve(this.project);
               if (d0 && (d0.kind === SyntaxKind.ClassDeclaration || d0.kind === SyntaxKind.InterfaceDeclaration)) {
+                erasedClassBases.push({ getSymbol: () => s, symbol: s });
                 collectHeritage(d0);
               }
             }
@@ -499,6 +501,7 @@ export class Ts7Assembler {
           } else {
             const d0 = s.declarations?.[0]?.resolve(this.project);
             if (d0 && d0.kind === SyntaxKind.InterfaceDeclaration) {
+              erasedClassBases.push({ getSymbol: () => s, symbol: s });
               collectHeritage(d0);
             }
           }
@@ -525,7 +528,8 @@ export class Ts7Assembler {
       const sig = this.checker.getSignatureFromDeclaration(effectiveCtor);
       const initializer: any = { locationInModule: this._locationOf(effectiveCtor) };
       if (sig) {
-        const params = sig.getParameters().map((p: any) => this._visitParameter(p));
+        const paramDocs = this._ctorParamDocs(sig, effectiveCtor);
+        const params = sig.getParameters().map((p: any) => this._visitParameter(p, paramDocs));
         if (params.length) {
           initializer.parameters = params;
         }
@@ -545,7 +549,7 @@ export class Ts7Assembler {
       jsiiType.initializer = init;
     }
 
-    this._visitMembers(sym, decl, jsiiType, false);
+    this._visitMembers(sym, decl, jsiiType, false, erasedClassBases);
   }
 
   /**
@@ -595,11 +599,29 @@ export class Ts7Assembler {
   // members (strada: _visitProperty / _visitMethod live under this)
   // -------------------------------------------------------------------------
 
-  private _visitMembers(sym: any, decl: any, jsiiType: any, isInterface: boolean): void {
+  private _visitMembers(sym: any, decl: any, jsiiType: any, isInterface: boolean, erasedBases: any[] = []): void {
     const { SyntaxKind, SymbolFlags } = this.np;
     const type = this.checker.getTypeAtLocation(decl);
     const props: any[] = [];
     const methods: any[] = [];
+
+    // A member is "owned here" (must be listed on this type) if it is declared
+    // directly on this declaration OR on one of the erased base declarations
+    // (private/internal/unexported bases that jsii folds into this type). Members
+    // declared on a *named* (referenced) base interface are NOT re-listed — they
+    // come in via the `interfaces` reference. We resolve erased-base declaration
+    // nodes from the erased base *types* so the comparison is by node identity.
+    const erasedDecls = new Set<any>();
+    for (const eb of erasedBases) {
+      const s = eb.getSymbol?.() ?? eb.symbol;
+      for (const d of s?.declarations ?? []) {
+        const rd = d?.resolve ? d.resolve(this.project) : d;
+        if (rd) {
+          erasedDecls.add(rd);
+        }
+      }
+    }
+    const ownedHere = (owner: any): boolean => owner != null && erasedDecls.has(owner);
 
     for (const p of this.checker.getPropertiesOfType(type)) {
       if (this._isInternal(p)) {
@@ -617,12 +639,8 @@ export class Ts7Assembler {
       }
       const isParamProp = pDecl.kind === SyntaxKind.Parameter;
       const owner = isParamProp ? pDecl.parent?.parent : pDecl.parent;
-      if (owner !== decl) {
-        const ownerSym = owner?.name ? this.checker.getSymbolAtLocation(owner.name) : undefined;
-        const pfqn = ownerSym && (this.typeFqnBySymbolId.get(ownerSym.id) ?? this._externalFqnOf(ownerSym));
-        if (pfqn) {
-          continue; // declared on an exported/foreign base: not re-listed
-        }
+      if (owner !== decl && !ownedHere(owner)) {
+        continue; // declared on a named (referenced) base: not re-listed
       }
       if ((p.flags & SymbolFlags.Method) !== 0) {
         const m = this._visitMethod(p, pDecl, false);
@@ -686,7 +704,8 @@ export class Ts7Assembler {
       m.protected = true;
     }
     if (sig) {
-      const params = sig.getParameters().map((p: any) => this._visitParameter(p));
+      const paramDocs = this._paramDocsOf(msym);
+      const params = sig.getParameters().map((p: any) => this._visitParameter(p, paramDocs));
       if (params.length) {
         m.parameters = params;
       }
@@ -739,7 +758,7 @@ export class Ts7Assembler {
     return this._withDefaultDocs(p);
   }
 
-  private _visitParameter(prm: any): any {
+  private _visitParameter(prm: any, paramDocs?: Map<string, string>): any {
     const decl = prm.declarations?.[0]?.resolve(this.project);
     const t = decl ? this.checker.getTypeOfSymbolAtLocation(prm, decl) : undefined;
     const opt: { optional?: boolean } = {};
@@ -750,11 +769,60 @@ export class Ts7Assembler {
     } else if (decl?.questionToken != null || decl?.initializer != null || opt.optional) {
       p.optional = true;
     }
-    const d = this._visitDocumentation(prm);
-    if (d) {
-      p.docs = d;
+    // Parameter docs come from the owner signature's `@param <name> <desc>` tags,
+    // not from the parameter symbol's own comment.
+    const summary = paramDocs?.get(prm.name);
+    if (summary) {
+      p.docs = { ...(p.docs ?? {}), summary };
     }
     return p;
+  }
+
+  /**
+   * Extract `@param <name> <description>` docs from a method/constructor symbol,
+   * returning a map of parameter name -> summary text.
+   */
+  private _paramDocsOf(ownerSym: any): Map<string, string> {
+    const out = new Map<string, string>();
+    if (!ownerSym?.getJsDocTags) {
+      return out;
+    }
+    this._collectParamTags(ownerSym.getJsDocTags(this.checker), out);
+    return out;
+  }
+
+  /** Constructor `@param` docs: try the signature, then the ctor declaration's symbol. */
+  private _ctorParamDocs(sig: any, ctorDecl: any): Map<string, string> {
+    const out = new Map<string, string>();
+    if (sig?.getJsDocTags) {
+      this._collectParamTags(sig.getJsDocTags(this.checker), out);
+    }
+    if (out.size === 0) {
+      const s = ctorDecl?.symbol ?? (ctorDecl?.name ? this.checker.getSymbolAtLocation(ctorDecl.name) : undefined);
+      if (s?.getJsDocTags) {
+        this._collectParamTags(s.getJsDocTags(this.checker), out);
+      }
+    }
+    return out;
+  }
+
+  private _collectParamTags(tags: any[], out: Map<string, string>): void {
+    for (const tag of tags ?? []) {
+      if (tag.name !== 'param') {
+        continue;
+      }
+      const text = typeof tag.text === 'string' ? tag.text : (tag.text ?? []).map((x: any) => x.text).join('');
+      const trimmed = text.trim();
+      const sp = trimmed.search(/\s/);
+      if (sp <= 0) {
+        continue;
+      }
+      const pname = trimmed.slice(0, sp);
+      const desc = trimmed.slice(sp + 1).trim();
+      if (pname && desc && !out.has(pname)) {
+        out.set(pname, desc);
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
