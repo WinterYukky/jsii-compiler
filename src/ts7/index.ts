@@ -43,14 +43,28 @@ export interface Ts7EmitResult {
   readonly typeCount: number;
 }
 
-/** Derive the entrypoint .ts from the package.json `types`/`main` fields. */
+/**
+ * Derive the entrypoint .ts from the package.json `types`/`main` fields.
+ *
+ * Mirrors the strada Assembler's `mainFile` computation: start from the declared
+ * `types` (or `main`), turn the `.d.ts`/`.js` into `.ts`, then — if an
+ * out-of-source build is configured (tsc `outDir`) — re-root the path from the
+ * `outDir` into the `rootDir`. This correctly handles both conventional
+ * `src`->`lib` layouts and in-place (`rootDir === outDir`) layouts.
+ */
 function deriveEntry(projectRoot: string, pkg: any): string {
-  const dts = pkg.types ?? pkg.main ?? 'index.d.ts';
-  const rel = dts
-    .replace(/\.d\.ts(x?)$/, '.ts$1')
-    .replace(/\.js$/, '.ts')
-    .replace(/^lib\//, 'src/');
-  return path.resolve(projectRoot, rel);
+  const dts: string = pkg.types ?? pkg.main ?? 'index.d.ts';
+  let mainFile = dts.replace(/\.d\.ts(x?)$/, '.ts$1').replace(/\.js$/, '.ts');
+
+  const tsc = pkg.jsii?.tsc ?? {};
+  const outDir: string | undefined = tsc.outDir;
+  const rootDir: string | undefined = tsc.rootDir;
+  if (outDir != null) {
+    // strip the outDir prefix, then prepend rootDir (if any)
+    const rel = path.relative(outDir, mainFile);
+    mainFile = rootDir != null ? path.join(rootDir, rel) : rel;
+  }
+  return path.resolve(projectRoot, mainFile);
 }
 
 /**
