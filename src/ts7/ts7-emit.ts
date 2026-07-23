@@ -65,10 +65,16 @@ export function runTs7EmitPipeline(
 
   const emittedFiles: string[] = [];
 
-  for (const sf of program.getSourceFiles()) {
-    const fileName: string = sf.fileName;
+  // The TS7 program handle exposes getSourceFileNames() (not getSourceFiles()).
+  const sourceFileNames: string[] = program.getSourceFileNames();
+  for (const fileName of sourceFileNames) {
     // Only emit local, non-declaration source files.
     if (!fileName.startsWith(root) || fileName.includes('node_modules') || /\.d\.ts$/.test(fileName)) {
+      continue;
+    }
+
+    const sf = program.getSourceFile(fileName);
+    if (!sf) {
       continue;
     }
 
