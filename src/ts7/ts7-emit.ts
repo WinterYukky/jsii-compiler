@@ -45,22 +45,25 @@ export function runTs7EmitPipeline(
   const root = options.projectRoot;
   const assembly = options.assembly;
 
-  // Map absolute source-file path -> [{ name, fqn }] of exported classes declared
-  // there, so we can inject rtti into that file's emitted `.js`.
-  const classesBySourceFile = new Map<string, Array<{ name: string; fqn: string }>>();
+  // Map the emitted `.js` basename (e.g. "construct.js") -> exported classes to
+  // stamp with rtti. We key by the emitted JS filename rather than the source
+  // path to avoid any source-path normalization mismatches between the assembly's
+  // `locationInModule.filename` and the program's source file names.
+  const classesByJsBasename = new Map<string, Array<{ name: string; fqn: string }>>();
   for (const [fqn, type] of Object.entries(assembly.types ?? {})) {
     if ((type as any).kind !== spec.TypeKind.Class) {
       continue;
     }
-    const rel = (type as any).locationInModule?.filename;
+    const rel: string | undefined = (type as any).locationInModule?.filename;
     if (!rel) {
       continue;
     }
-    const abs = path.resolve(root, rel);
-    if (!classesBySourceFile.has(abs)) {
-      classesBySourceFile.set(abs, []);
+    // e.g. "src/construct.ts" -> "construct.js"
+    const jsBasename = path.basename(rel).replace(/\.tsx?$/, '.js');
+    if (!classesByJsBasename.has(jsBasename)) {
+      classesByJsBasename.set(jsBasename, []);
     }
-    classesBySourceFile.get(abs)!.push({ name: (type as any).name, fqn });
+    classesByJsBasename.get(jsBasename)!.push({ name: (type as any).name, fqn });
   }
 
   const emittedFiles: string[] = [];
@@ -83,14 +86,15 @@ export function runTs7EmitPipeline(
       continue;
     }
 
-    const classesHere = classesBySourceFile.get(fileName);
-
     for (const out of emitOutput.outputFiles) {
       let text: string = out.text;
 
-      // Inject rtti into the JS output for classes declared in this source file.
-      if (classesHere && classesHere.length && /\.js$/.test(out.name) && !/\.d\.ts$/.test(out.name)) {
-        text += rttiSnippet(classesHere, assembly.version);
+      // Inject rtti into the JS output for classes emitted into this file.
+      if (/\.js$/.test(out.name)) {
+        const classesHere = classesByJsBasename.get(path.basename(out.name));
+        if (classesHere && classesHere.length) {
+          text += rttiSnippet(classesHere, assembly.version);
+        }
       }
 
       const outPath = path.resolve(root, out.name);
