@@ -10,19 +10,16 @@ Suggested title:
 To test whether [jsii](https://github.com/aws/jsii-compiler) (the AWS CDK
 multi-language binding generator) can run on the `@typescript/native-preview`
 API, we built an experimental port and measured it against `aws-cdk-lib`
-(20,744 types / ~100k members). Headline results:
+(20,744 types / ~100k members). The port works, and is 3.4x faster
+end-to-end than the strada-based pipeline (119s → 35.5s), with output parity
+enforced at every step. Go-side type computation turned out to be faster
+than strada's in-process checker for the same work (~15s vs ~17.6s). The
+remaining bottleneck is neither compute nor payload size: it is ~500k
+synchronous RPC round-trips at ~12-21µs fixed cost each.
 
-- **Feasibility confirmed — and the experimental port is 3.4x faster
-  end-to-end** than the strada-based pipeline (119s → 35.5s), with output
-  parity enforced at every step.
-- **Go-side type computation is faster than strada's in-process checker**
-  (~15s vs ~17.6s) for the same work.
-- **The remaining bottleneck is neither compute nor payload size — it is
-  ~500k synchronous RPC round-trips** at ~12-21µs fixed cost each.
-
-Below: background on why this workload stresses the API, the measurements
-that isolate that conclusion, suggestions, and two parity-proven patches
-we're happy to PR.
+The rest of this issue covers why this workload stresses the API, the
+measurements that isolate that conclusion, suggestions, and two
+parity-proven patches we're happy to PR.
 
 ## Background: why jsii stresses the API
 
@@ -96,7 +93,8 @@ Findings:
    is not ~500k sequential waits.
 3. **Input-keyed caching on Checker query methods** (node /
    symbol+location), valid per snapshot.
-4. ~~A disk-writing emit mode~~ — already shipped in #4699. Thank you!
+4. A disk-writing emit mode was on this list as well, but #4699 has since
+   shipped it, so we consider it addressed.
 
 ## Patches (parity-proven, ready to PR)
 
