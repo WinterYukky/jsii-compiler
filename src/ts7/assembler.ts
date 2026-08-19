@@ -90,6 +90,7 @@ export class Ts7Assembler {
   // the symbol's declaration coordinate (path:index), which is stable.
   private readonly _jsDocTagsCache = new Map<string, any[]>();
   private readonly _docCommentCache = new Map<string, any>();
+  private readonly _sourceTextCache = new Map<string, string>();
   private _docCacheHits = 0;
 
   /** Number of doc-read cache hits (RPCs avoided). Exposed for perf reporting. */
@@ -729,13 +730,22 @@ export class Ts7Assembler {
         const params = sig.getParameters().map((p: any) => this._visitParameter(p));
         if (params.length) {
           initializer.parameters = params;
-        }
-        if (params.some((p: any) => p.variadic)) {
-          initializer.variadic = true;
+          if (params.some((p: any) => p.variadic)) {
+            initializer.variadic = true;
+          }
+          // strada quirk: `initializer.protected` is assigned inside its
+          // parameter loop, so a protected ZERO-parameter constructor does not
+          // get the flag. Reproduced bug-for-bug for parity.
+          if ((effectiveCtor.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.ProtectedKeyword)) {
+            initializer.protected = true;
+          }
         }
       }
-      if ((effectiveCtor.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.ProtectedKeyword)) {
-        initializer.protected = true;
+      // strada: initializer docs come from the constructor symbol's JSDoc
+      // (summary/remarks + tags like @default), same as any member.
+      const ctorDocs = this._docsFromDeclJsDoc(effectiveCtor);
+      if (ctorDocs) {
+        initializer.docs = ctorDocs;
       }
       jsiiType.initializer = this._withDefaultDocs(initializer);
     } else {
@@ -960,7 +970,19 @@ export class Ts7Assembler {
         m.variadic = true;
       }
       const opt: { optional?: boolean } = {};
-      const ret = this._typeReference(this.checker.getReturnTypeOfSignature(sig), opt, decl.type);
+      let retType = this.checker.getReturnTypeOfSignature(sig);
+      let retNode = decl.type;
+      // Promise-returning methods: jsii marks them `async` and models the
+      // resolved type (Promise<string> -> string), like strada.
+      if (retType && typeof retType.isTypeReference === 'function' && retType.isTypeReference()) {
+        const tsym = retType.getTarget?.()?.getSymbol?.();
+        if (tsym?.name === 'Promise' && this._isStdlibDecl(tsym)) {
+          m.async = true;
+          retType = this.checker.getTypeArguments(retType)?.[0];
+          retNode = retNode?.typeArguments?.[0];
+        }
+      }
+      const ret = this._typeReference(retType, opt, retNode);
       if (ret) {
         m.returns = opt.optional ? { optional: true, type: ret } : { type: ret };
       }
@@ -1016,16 +1038,291 @@ export class Ts7Assembler {
     } else if (decl?.questionToken != null || decl?.initializer != null || opt.optional) {
       p.optional = true;
     }
-    // NOTE (Phase 2B): parameter docs (`@param`) are intentionally NOT derived
-    // here. jsii's parameter-doc behavior is declaration-origin dependent (e.g.
-    // inherited/overridden methods omit them) and reproducing it from the raw
-    // JSDoc tags was net-neutral and fragile. Deferred to Phase 2B; see
-    // PHASE1-RESULTS.md.
-    const d = this._visitDocumentation(prm);
-    if (d) {
-      p.docs = d;
+    // Parameter docs mirror TS5's services semantics that strada relies on:
+    // 1. the `@param` tag from the JSDoc of the function declaration that OWNS
+    //    the parameter (never the base/overridden signature's @param — method
+    //    params do NOT inherit docs);
+    // 2. when a CONSTRUCTOR parameter has no own @param, TS5's
+    //    findBaseOfDeclaration falls back to the documentation of a PROPERTY
+    //    with the parameter's name on the first super type that has one (this
+    //    is how e.g. RemoveTag's ctor param `key` gets TagBase.key's doc).
+    // The tsgo checker's doc APIs implement different inheritance (methods
+    // over-inherit, some @param tags are missed), so the @param text is read
+    // straight from the owning declaration's JSDoc source text.
+    // TS collects parameter docs from BOTH an inline JSDoc block directly on
+    // the parameter declaration (common for documented parameter properties)
+    // and the `@param` tag of the owning function's JSDoc; when both exist
+    // they are concatenated (inline first), as strada's output shows.
+    const inline = this._inlineJsDocText(decl);
+    const tagText = this._paramDocComment(prm, decl);
+    let comments = inline != null && tagText != null ? `${inline}\n${tagText}` : inline ?? tagText;
+    if (comments === undefined && decl?.parent?.kind === this.np.SyntaxKind.Constructor) {
+      comments = this._inheritedCtorParamDoc(prm, decl);
+    }
+    if (comments) {
+      const { summary, remarks } = this._splitSummary(comments);
+      const docs: any = {};
+      if (remarks) {
+        docs.remarks = remarks;
+      }
+      if (summary) {
+        docs.summary = summary;
+      }
+      if (Object.keys(docs).length) {
+        p.docs = docs;
+      }
     }
     return p;
+  }
+
+  /**
+   * Extract the `@param <name>` description for a parameter from the JSDoc
+   * block that immediately precedes its owning function declaration. Returns
+   * undefined when the declaration has no JSDoc or no matching @param tag.
+   */
+  private _paramDocComment(prm: any, paramDecl: any): string | undefined {
+    const funcDecl = paramDecl?.parent;
+    const block = funcDecl ? this._leadingJsDocBlock(funcDecl) : undefined;
+    if (!block) {
+      return undefined;
+    }
+    const out: string[] = [];
+    let capturing = false;
+    let done = false;
+    // A new `@tag` starts even MID-LINE in the TS JSDoc parser (e.g.
+    // "...Lambda function. @see Permission for details." ends the @param text
+    // before "@see"), except inside an inline `{@link ...}`.
+    const cutInlineTag = (s: string): { text: string; cut: boolean } => {
+      const m = /(?:^|[^{\S])@[A-Za-z]/.exec(s);
+      if (!m) {
+        return { text: s, cut: false };
+      }
+      const at = s.indexOf('@', m.index);
+      return { text: s.slice(0, at).replace(/\s+$/, ''), cut: true };
+    };
+    for (const line of this._jsDocLines(block)) {
+      if (done) {
+        break;
+      }
+      if (capturing) {
+        if (/^@/.test(line)) {
+          break;
+        }
+        const { text, cut } = cutInlineTag(line);
+        out.push(text);
+        done = cut;
+        continue;
+      }
+      // Keep the text verbatim after the parameter name (including a leading
+      // `- ` separator — strada keeps it in the summary).
+      // Accept `@param name`, `@param [name]` and `@param [name=default]`
+      // (JSDoc optional-parameter syntax), with an optional `{type}` prefix.
+      const m = /^@param\s+(?:\{[^}]*\}\s+)?(?:\[([\w$]+)(?:=[^\]]*)?\]|([\w$]+))\s*(.*)$/.exec(line);
+      if (m && (m[1] ?? m[2]) === prm.name) {
+        capturing = true;
+        const { text, cut } = cutInlineTag(m[3]);
+        out.push(text);
+        done = cut;
+      }
+    }
+    if (!capturing) {
+      return undefined;
+    }
+    const result = out.join('\n').trim();
+    return result === '' ? undefined : result;
+  }
+
+  /** Source text of a declaration's file (client-side cache; no RPC). */
+  private _sourceTextOf(sf: any): string {
+    if (typeof sf?.text === 'string') {
+      return sf.text;
+    }
+    let text = this._sourceTextCache.get(sf?.fileName);
+    if (text === undefined) {
+      try {
+        text = fs.readFileSync(sf.fileName, 'utf8');
+      } catch {
+        text = '';
+      }
+      this._sourceTextCache.set(sf.fileName, text);
+    }
+    return text;
+  }
+
+  /** The last JSDoc block in a node's leading trivia, or undefined. */
+  private _leadingJsDocBlock(node: any): string | undefined {
+    const sf = node?.getSourceFile?.();
+    if (!sf) {
+      return undefined;
+    }
+    const text = this._sourceTextOf(sf);
+    if (!text) {
+      return undefined;
+    }
+    const leading = text.slice(node.pos, node.getStart(sf));
+    const blocks = leading.match(/\/\*\*[\s\S]*?\*\//g);
+    return blocks && blocks.length ? blocks[blocks.length - 1] : undefined;
+  }
+
+  /** Margin-stripped lines of a JSDoc block. */
+  private _jsDocLines(block: string): string[] {
+    return block
+      .replace(/^\/\*\*/, '')
+      .replace(/\*\/$/, '')
+      .split('\n')
+      .map((l) => l.replace(/^\s*\*?\s*/, '').replace(/\s+$/, ''));
+  }
+
+  /** Full text of an inline JSDoc block attached to a declaration, or undefined. */
+  private _inlineJsDocText(decl: any): string | undefined {
+    const block = decl ? this._leadingJsDocBlock(decl) : undefined;
+    if (!block) {
+      return undefined;
+    }
+    const textLines: string[] = [];
+    for (const line of this._jsDocLines(block)) {
+      if (/^@/.test(line)) {
+        break;
+      }
+      textLines.push(line);
+    }
+    const result = textLines.join('\n').trim();
+    return result === '' ? undefined : result;
+  }
+
+  /**
+   * Build a jsii docs object from a declaration's leading JSDoc, mirroring what
+   * `_visitDocumentation` produces from the symbol doc APIs (summary/remarks +
+   * the doc tags jsii consumes). Used for constructor (initializer) docs, where
+   * no symbol-level doc read exists on the ts7 path.
+   */
+  private _docsFromDeclJsDoc(decl: any): any | undefined {
+    const block = this._leadingJsDocBlock(decl);
+    if (!block) {
+      return undefined;
+    }
+    const lines = this._jsDocLines(block);
+    const commentLines: string[] = [];
+    const tags: Array<{ name: string; text: string }> = [];
+    let current: { name: string; text: string[] } | undefined;
+    for (const line of lines) {
+      const tm = /^@([A-Za-z][\w-]*)\s*(.*)$/.exec(line);
+      if (tm) {
+        if (current) {
+          tags.push({ name: current.name, text: current.text.join('\n') });
+        }
+        current = { name: tm[1], text: [tm[2]] };
+      } else if (current) {
+        current.text.push(line);
+      } else {
+        commentLines.push(line);
+      }
+    }
+    if (current) {
+      tags.push({ name: current.name, text: current.text.join('\n') });
+    }
+    const docs: any = {};
+    const comment = commentLines.join('\n').trim();
+    if (comment) {
+      const { summary, remarks } = this._splitSummary(comment);
+      if (remarks) {
+        docs.remarks = remarks;
+      }
+      docs.summary = summary;
+    }
+    for (const tag of tags) {
+      const tagText = tag.text.replace(/\{@link\s+([^}]*?)\s*\}/g, '{@link $1 }');
+      switch (tag.name) {
+        case 'default':
+          docs.default = tagText.trim();
+          break;
+        case 'deprecated':
+          docs.deprecated = tagText.trim();
+          docs.stability = 'deprecated';
+          break;
+        case 'stability':
+          docs.stability = tagText.trim();
+          break;
+        case 'example':
+          docs.example = tagText.replace(/^\n/, '');
+          break;
+        case 'returns':
+          docs.returns = tagText.trim();
+          break;
+        case 'see':
+          docs.see = tagText.trim();
+          break;
+        default:
+          break;
+      }
+    }
+    return Object.keys(docs).length ? docs : undefined;
+  }
+
+  /**
+   * TS5 `findBaseOfDeclaration` fallback for constructor parameters: the first
+   * super type (extends/implements, in source order) that has a PROPERTY named
+   * like the parameter contributes that property's documentation; the search
+   * stops at the first super type owning such a property even when its docs
+   * are empty. Method parameters have no such fallback.
+   */
+  private _inheritedCtorParamDoc(prm: any, paramDecl: any): string | undefined {
+    return this._inheritedPropDocFromBases(paramDecl.parent?.parent, prm.name, new Set());
+  }
+
+  /**
+   * TS5 `findBaseOfDeclaration` search: the first super type (extends /
+   * implements, in source order) of a class/interface declaration that has a
+   * property with the given name contributes that property's documentation —
+   * even when empty (the search stops there). Doc resolution for the found
+   * property is itself recursive: a class element with no own JSDoc inherits
+   * from ITS super types (e.g. a getter overriding an interface property).
+   */
+  private _inheritedPropDocFromBases(classOrIfaceDecl: any, name: string, seen: Set<string>): string | undefined {
+    for (const h of classOrIfaceDecl?.heritageClauses ?? []) {
+      for (const t of h.types ?? []) {
+        const s0 = this.checker.getSymbolAtLocation(t.expression);
+        const s = s0 ? this._resolveAlias(s0) : undefined;
+        const baseDecl = s?.declarations?.[0]?.resolve(this.project);
+        const baseType = baseDecl ? this.checker.getTypeAtLocation(baseDecl) : undefined;
+        const psym = baseType ? this.checker.getPropertyOfType(baseType, name) : undefined;
+        if (psym) {
+          return this._symbolDocTextFromSource(psym, seen);
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Documentation text of a member symbol, read from source (the tsgo doc APIs
+   * return an empty comment for several of these members — one of the JSDoc
+   * behaviour gaps this backend works around). A constructor parameter
+   * property's docs come from an inline JSDoc on the parameter or the
+   * constructor's `@param` tag; other members use their leading JSDoc. Empty
+   * own docs recurse into the owner's super types.
+   */
+  private _symbolDocTextFromSource(psym: any, seen: Set<string>): string | undefined {
+    const { SyntaxKind } = this.np;
+    const d0 = psym.declarations?.[0];
+    const key = `${d0?.path}:${d0?.index}`;
+    if (!d0 || seen.has(key)) {
+      return undefined;
+    }
+    seen.add(key);
+    const pd = d0.resolve(this.project);
+    if (!pd) {
+      return undefined;
+    }
+    const own =
+      pd.kind === SyntaxKind.Parameter
+        ? this._inlineJsDocText(pd) ?? this._paramDocComment(psym, pd)
+        : this._inlineJsDocText(pd);
+    if (own !== undefined) {
+      return own;
+    }
+    const owner = pd.parent?.kind === SyntaxKind.Constructor ? pd.parent.parent : pd.parent;
+    return this._inheritedPropDocFromBases(owner, psym.name, seen);
   }
 
   // -------------------------------------------------------------------------
@@ -1286,40 +1583,36 @@ export class Ts7Assembler {
     return Object.keys(docs).length ? docs : undefined;
   }
 
-  /** Split a doc comment into the first-sentence summary and the remainder. */
-  private _splitSummary(text: string): { summary: string; remarks?: string } {
-    let splitAt = -1;
-    let paren = 0;
-    let tick = false;
-    for (let i = 0; i < text.length - 1; i++) {
-      const ch = text[i];
-      if (ch === '`') {
-        tick = !tick;
-      } else if (!tick && (ch === '(' || ch === '[')) {
-        paren++;
-      } else if (!tick && (ch === ')' || ch === ']')) {
-        paren = Math.max(0, paren - 1);
-      } else if (ch === '.' && !tick && paren === 0 && /\s/.test(text[i + 1])) {
-        const before = text.slice(Math.max(0, i - 3), i).toLowerCase();
-        if (before.endsWith('e.g') || before.endsWith('i.e') || before.endsWith('etc')) {
-          continue;
-        }
-        splitAt = i;
-        break;
-      }
+  // Exact port of jsii's summary/remarks split (src/docs.ts splitSummary /
+  // summaryLine / endWithPeriod / noNewlines / uberTrim), including its quirks
+  // (the paragraph split keeps separator captures in the array; the sentence
+  // regex requires whitespace after the punctuation; ';' counts as terminal
+  // punctuation, so "the resource type;\nex: ..." splits into summary+remarks).
+  private static readonly _PUNCT = ['!', '?', '.', ';'].map((s) => `\\${s}`).join('');
+  private static readonly _ENDS_WITH_PUNCTUATION = new RegExp(`[${Ts7Assembler._PUNCT}]$`);
+  private static readonly _FIRST_SENTENCE = new RegExp(`^([^${Ts7Assembler._PUNCT}]+[${Ts7Assembler._PUNCT}][ \\n\\r])`);
+  private static readonly _SUMMARY_MAX_WORDS = 20;
+
+  private _splitSummary(docBlock: string): { summary?: string; remarks?: string } {
+    if (!docBlock) {
+      return {};
     }
-    const summaryRaw = splitAt >= 0 ? text.slice(0, splitAt + 1) : text;
-    const rest = splitAt >= 0 ? text.slice(splitAt + 1).trim() : '';
-    const summary = this._normalizeSummary(summaryRaw);
-    return { summary, remarks: rest || undefined };
+    const summary = this._summaryLine(docBlock);
+    const rest = docBlock.slice(summary.length).trim();
+    const s = summary.trim().replace(/\r?\n/g, ' ');
+    return {
+      summary: Ts7Assembler._ENDS_WITH_PUNCTUATION.test(s) ? s : `${s}.`,
+      remarks: rest === '' ? undefined : rest,
+    };
   }
 
-  /** Collapse whitespace, trim, and ensure a terminal period (jsii summary form). */
-  private _normalizeSummary(text: string): string {
-    return text
-      .replace(/\s+/g, ' ')
-      .trim()
-      .replace(/(?<![.!?])$/, '.');
+  private _summaryLine(str: string): string {
+    const paras = str.split(/(\r?\n){2}/);
+    if (paras.length > 1 && paras[0].split(' ').length < Ts7Assembler._SUMMARY_MAX_WORDS) {
+      return paras[0];
+    }
+    const m = Ts7Assembler._FIRST_SENTENCE.exec(str);
+    return m ? m[1] : paras[0];
   }
 
   private _withDefaultDocs(obj: any): any {

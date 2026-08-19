@@ -7,10 +7,11 @@
 ## TL;DR
 
 The experimental `JSII_COMPILER_BACKEND=ts7` backend generates `.jsii` assemblies
-that are **byte-for-byte identical to strada on small/medium real packages, and
-99.7% member-identical on aws-cdk-lib (20,744 types)**, while running the
-check+assemble step **~2.9x faster** than strada. The remaining 0.3% is a small
-set of well-understood, enumerated edge cases (not deep bugs).
+that are **100% type- and member-identical to strada on every gate, including
+aws-cdk-lib (21,192 types / 102,570 members)** — see "Phase 2F" below — while
+running the check+assemble step **~3.7x faster** than strada (~32s vs 119s).
+Phase 1 measured 99.7% member parity; Phases 2A/2F closed the remaining tail
+completely.
 
 ## Verification results
 
@@ -80,7 +81,74 @@ re-materializes fresh nodes each call, so `===` on nodes is unreliable; this
 same trap bit the rtti injection earlier). Restored EXTRA to baseline (363) while
 keeping MISSING at 8.
 
-### Remaining Phase 2B tail (aws-cdk-lib)
+## Phase 2F — parity closure: aws-cdk-lib at 100%
+
+Phase 2F eliminated the entire remaining tail. Final state (same gates,
+compare-jsii.mjs):
+
+| Gate | Types | Members | Field diffs | Member diffs | walltime (c7i.4xlarge) |
+|---|---:|---:|---:|---:|---|
+| `constructs` | 12/12 | 53/53 (100%) | 0 | 0 | — |
+| `cloud-assembly-schema` | 59/59 | 213/213 (100%) | 0 | 0 | — |
+| `aws-cdk-lib` | **21192/21192** | **102570/102570 (100%)** | **0** | **0** | **~32s vs strada 119s** |
+
+The constructs emit gate was also tightened: identical emitted file set, every
+`.d.ts` byte-identical to strada, and runtime-identical `Symbol.for("jsii.rtti")`
+on all exported classes.
+
+What it took (each item is a strada-semantics port, none a ts7 API limitation):
+
+- **Inherited static members**: apply the same declaring-type / erased-base rule
+  as the instance loop to the static loop; a base dropped by `--strip-deprecated`
+  is NOT an erased base (DeprecatedRemover deletes the type without folding
+  members into subclasses).
+- **Enum members from union constituents**: strada derives enum members from
+  `type.isUnion() ? type.types : [type]`, so aliased members (`COLD_HDD = SC1`)
+  collapse into their canonical member. (The Phase 2B hypothesis that this was a
+  strip-deprecated leak was wrong.)
+- **Cross-submodule named re-exports**: strada emits a duplicate type entry for
+  `export { X } from 'other-submodule'` (ExportSpecifier WITH a module
+  specifier, visited in the current namespace); `import`-then-re-export aliases
+  are silently dropped by its visitor, and ancestor-dir re-exports collapse into
+  the canonical fqn. Reproducing this exactly fixed `aws_docdb.CaCertificate`
+  without duplicating the ~3,400-type `interfaces.*` tree.
+- **Member re-listing rule**: a member is re-listed only when its declaring
+  declaration is the type itself or one of its erased bases; members arriving
+  through a NAMED base's erased ancestors are not re-listed (fixed all 363
+  EXTRA inherited struct props).
+- **Parameter properties**: only listed for the EFFECTIVE constructor (own, or
+  first along the erased-base chain).
+- **Boxed stdlib wrapper types**: `Number`/`String`/`Boolean`/`Date` declared in
+  `lib.*.d.ts` map to primitives (strada `_tryMakePrimitiveType`).
+- **Promise-returning methods**: `async: true` + model the resolved type
+  (`Promise<string>` -> `string`).
+- **Parameter documentation** (the deferred DIFFER 138): exact port of TS5's
+  services semantics, reading JSDoc from **source text** instead of the tsgo doc
+  APIs: `@param` comes from the owning declaration's JSDoc only (methods never
+  inherit param docs); an inline JSDoc on the parameter and a `@param` tag
+  concatenate; a CONSTRUCTOR parameter with no own doc falls back
+  (`findBaseOfDeclaration`) to a same-named PROPERTY on the first super type,
+  recursively through empty-doc overrides. Plus an exact port of jsii's
+  `splitSummary` (paragraph/first-sentence split where `;` counts as terminal
+  punctuation, `- ` separators preserved, mid-line `@tag` terminates tag text).
+- **Initializer docs**: parsed from the effective constructor's JSDoc block
+  (`@default` etc.); strada quirk reproduced bug-for-bug: `protected` is only
+  recorded on initializers that have at least one parameter.
+
+### tsgo JSDoc behaviour gaps found (upstream PR candidates)
+
+The parameter-doc work surfaced two tsgo checker doc-API behaviour differences
+vs TS5, which the backend now works around by reading source text directly:
+
+1. **Over-inheritance**: `getJsDocTags`/`getDocumentationComment` on a parameter
+   of an overriding method returns the BASE signature's `@param` doc even when
+   the override has its own (param-less) JSDoc. TS5 never inherits param docs
+   for methods.
+2. **Under-extraction**: some `@param`-derived docs (e.g. for parameter
+   properties) and some property doc comments return empty where TS5 returns
+   the documentation.
+
+## Historical: remaining Phase 2B tail (aws-cdk-lib) — all resolved in Phase 2F
 
 - **EXTRA 363** — some struct props (e.g. `AssetStagingProps.exclude/extraHash/
   ignoreMode` from `FingerprintOptions`/`AssetOptions`) are still re-listed even
