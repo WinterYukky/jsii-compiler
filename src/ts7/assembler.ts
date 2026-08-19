@@ -101,6 +101,11 @@ export class Ts7Assembler {
   private readonly externalDeps = new Map<string, Set<string>>();
   private readonly stripDeprecated: boolean;
   private stripAllowList?: Set<string>;
+  // Type symbols dropped by --strip-deprecated. Unlike genuinely unexported
+  // (erased) bases, a stripped base is a *named* type that strada's
+  // DeprecatedRemover deletes post-assembly WITHOUT folding its members into
+  // subclasses — so member re-listing must not treat it as an erased base.
+  private readonly strippedTypeSymIds = new Set<unknown>();
 
   public constructor(np: NativePreview, project: Ts7Project, private readonly options: Ts7AssemblerOptions) {
     this.np = np;
@@ -318,7 +323,10 @@ export class Ts7Assembler {
 
   private _registerModuleExports(moduleExports: any[]): void {
     const { SyntaxKind, SymbolFlags } = this.np;
-    const candidates = new Map<unknown, Array<{ name: string; prefix: string; moduleDir: string; sym: any }>>();
+    const candidates = new Map<
+      unknown,
+      Array<{ name: string; prefix: string; moduleDir: string; sym: any; aliasDeclH?: any }>
+    >();
     const visitedModules = new Set<string>();
 
     const collect = (mExports: any[], prefix: string, moduleDir: string): void => {
@@ -339,7 +347,14 @@ export class Ts7Assembler {
           if (!candidates.has(sym.id)) {
             candidates.set(sym.id, []);
           }
-          candidates.get(sym.id)!.push({ name: e.name, prefix, moduleDir, sym });
+          // When the export is an alias, keep its own first declaration handle:
+          // it discriminates `export { X } from '...'` (ExportSpecifier with a
+          // module specifier — strada visits it in the CURRENT namespace and
+          // emits a duplicate entry) from `import { X } ...; export { X };`
+          // (strada's ExportSpecifier resolution lands on an ImportSpecifier,
+          // which no _visitNode branch handles — silently dropped).
+          const aliasDeclH = (e.flags & SymbolFlags.Alias) !== 0 ? e.declarations?.[0] : undefined;
+          candidates.get(sym.id)!.push({ name: e.name, prefix, moduleDir, sym, aliasDeclH });
         } else if (
           kind === SyntaxKind.SourceFile ||
           (sym.flags & SymbolFlags.ValueModule) !== 0 ||
@@ -361,9 +376,14 @@ export class Ts7Assembler {
     };
     collect(moduleExports, this.assemblyName, path.dirname(this.entry));
 
-    // FQN attribution: a type is owned by the shortest module path that contains
-    // its declaration (mirrors assembler-lite's "best candidate" selection).
-    const bests: Array<{ sym: any; name: string; fqn: string }> = [];
+    // FQN attribution: the *canonical* home of a type is the shortest module
+    // path that contains its declaration (mirrors assembler-lite's "best
+    // candidate" selection); typeFqnBySymbolId (reference resolution) uses it.
+    // A symbol additionally exported from OTHER submodules (cross-submodule
+    // re-export, e.g. aws_docdb re-exporting aws_rds.CaCertificate) gets a full
+    // duplicate type entry under each such fqn — strada emits one entry per
+    // namespace visit.
+    const registrations: Array<{ sym: any; name: string; fqn: string }> = [];
     for (const [, cands] of candidates) {
       let best = cands[0];
       let bestLen = -1;
@@ -376,30 +396,76 @@ export class Ts7Assembler {
           best = c;
         }
       }
-      bests.push({ sym: best.sym, name: best.name, fqn: `${best.prefix}.${best.name}` });
+      const bestFqn = `${best.prefix}.${best.name}`;
+      registrations.push({ sym: best.sym, name: best.name, fqn: bestFqn });
+      const extraFqns = new Set<string>([bestFqn]);
+      for (const c of cands) {
+        const fqn = `${c.prefix}.${c.name}`;
+        if (extraFqns.has(fqn)) {
+          continue;
+        }
+        // Only FOREIGN re-exports (candidate module dir does NOT contain the
+        // declaration, e.g. aws_docdb re-exporting a type declared in aws-rds/)
+        // produce a duplicate entry. Candidates from ancestor dirs (the package
+        // root re-exporting a submodule's type) collapse into the canonical fqn.
+        const declPath = c.sym.declarations?.[0]?.path ?? '';
+        const dir = c.moduleDir.endsWith('/') ? c.moduleDir : c.moduleDir + '/';
+        if (declPath.startsWith(dir)) {
+          continue;
+        }
+        // strada only emits the duplicate for `export { X } from '...'` — the
+        // alias declaration must be an ExportSpecifier whose ExportDeclaration
+        // carries a module specifier. Aliases that go through a local import
+        // (`import { X } ...; export { X };`) are dropped by strada's visitor.
+        if (!c.aliasDeclH || c.aliasDeclH.kind !== SyntaxKind.ExportSpecifier) {
+          continue;
+        }
+        const aliasDecl = c.aliasDeclH.resolve(this.project);
+        const exportDeclNode = aliasDecl?.parent?.parent;
+        if (exportDeclNode?.moduleSpecifier == null) {
+          continue;
+        }
+        extraFqns.add(fqn);
+        registrations.push({ sym: c.sym, name: c.name, fqn });
+      }
     }
     // Batch-prefetch docs for all candidate type symbols (used by the
     // isInternal/shouldStrip checks inside _registerType).
-    this._prefetchDocs(bests.map((b) => b.sym));
-    for (const b of bests) {
-      this._registerType(b.sym, b.name, b.fqn);
+    this._prefetchDocs(registrations.map((r) => r.sym));
+    for (const r of registrations) {
+      this._registerType(r.sym, r.name, r.fqn);
     }
   }
 
   private _registerType(sym: any, name: string, fqn: string): void {
     const { SyntaxKind } = this.np;
-    if (this.typeFqnBySymbolId.has(sym.id)) {
+    const isFirst = !this.typeFqnBySymbolId.has(sym.id);
+    if (!isFirst) {
+      // Already registered under its canonical fqn. A *different* fqn means a
+      // cross-submodule re-export: emit a duplicate entry under that fqn too
+      // (nested-export recursion runs only for the canonical registration).
+      if (this.typeFqnBySymbolId.get(sym.id) === fqn || this.exported.some((e) => e.fqn === fqn)) {
+        return;
+      }
+    }
+    if (this._isInternal(sym)) {
       return;
     }
-    if (this._isInternal(sym) || this._shouldStrip(sym, fqn)) {
+    if (this._shouldStrip(sym, fqn)) {
+      this.strippedTypeSymIds.add(sym.id);
       return;
     }
     const decl = sym.declarations?.[0]?.resolve(this.project);
     if (!decl) {
       return;
     }
-    this.typeFqnBySymbolId.set(sym.id, fqn);
+    if (isFirst) {
+      this.typeFqnBySymbolId.set(sym.id, fqn);
+    }
     this.exported.push({ name, sym, decl, fqn });
+    if (!isFirst) {
+      return;
+    }
 
     // nested exported types (namespaces on a class/interface)
     const nested = sym.getExports?.();
@@ -466,7 +532,7 @@ export class Ts7Assembler {
     }
 
     if (decl.kind === SyntaxKind.EnumDeclaration) {
-      this._visitEnum(sym, fqn, jsiiType);
+      this._visitEnum(sym, decl, fqn, jsiiType);
     } else if (decl.kind === SyntaxKind.InterfaceDeclaration) {
       this._visitInterface(sym, decl, name, jsiiType);
     } else {
@@ -475,13 +541,33 @@ export class Ts7Assembler {
     this.types[fqn] = jsiiType as spec.Type;
   }
 
-  private _visitEnum(sym: any, fqn: string, jsiiType: any): void {
+  private _visitEnum(sym: any, decl: any, fqn: string, jsiiType: any): void {
     const { SyntaxKind } = this.np;
     jsiiType.kind = 'enum';
     const members: any[] = [];
+    // strada derives enum members from the enum TYPE's union constituents
+    // (`type.isUnion() ? type.types : [type]`), not from the declaration. For
+    // aliased members (`COLD_HDD = SC1`) the alias shares the canonical member's
+    // literal type, so the alias never surfaces as its own constituent — this is
+    // why strada emits only canonical members (e.g. EbsDeviceVolumeType).
     const enumMembers: any[] = [];
-    for (const [, m] of sym.getExports()) {
-      enumMembers.push(m);
+    const type = this.checker.getTypeAtLocation(decl);
+    const constituents = typeof type?.isUnionType === 'function' && type.isUnionType() ? type.getTypes() : [type];
+    const seen = new Set<unknown>();
+    for (const c of constituents) {
+      const ms = c?.getSymbol?.() ?? c?.symbol;
+      if (!ms || ms.declarations?.[0]?.kind !== SyntaxKind.EnumMember || seen.has(ms.id)) {
+        continue;
+      }
+      seen.add(ms.id);
+      enumMembers.push(ms);
+    }
+    if (enumMembers.length === 0) {
+      // Fallback (single-valued or fully-computed enums where the declared type
+      // is not a union of member literals): walk the declaration's exports.
+      for (const [, m] of sym.getExports()) {
+        enumMembers.push(m);
+      }
     }
     this._prefetchDocs(enumMembers);
     for (const msym of enumMembers) {
@@ -721,7 +807,7 @@ export class Ts7Assembler {
     const erasedBaseSymIds = new Set<unknown>();
     for (const eb of erasedBases) {
       const s = eb.getSymbol?.() ?? eb.symbol;
-      if (s?.id != null) {
+      if (s?.id != null && !this.strippedTypeSymIds.has(s.id)) {
         erasedBaseSymIds.add(s.id);
       }
     }
@@ -758,9 +844,13 @@ export class Ts7Assembler {
         const ownerId = ownerTypeSym?.id;
         const isOwn = ownerId != null && ownerId === sym?.id;
         const isErasedBase = ownerId != null && erasedBaseSymIds.has(ownerId);
-        const pfqn = ownerTypeSym && (this.typeFqnBySymbolId.get(ownerId) ?? this._externalFqnOf(ownerTypeSym));
-        if (pfqn && !isOwn && !isErasedBase) {
-          continue; // declared on an exported/foreign named base: not re-listed
+        if (!isOwn && !isErasedBase) {
+          // strada re-lists a member only when its declaring declaration belongs
+          // to this type or one of its *erased* bases. A member declared on an
+          // unexported ancestor reachable only through a NAMED base (e.g.
+          // FileOptions behind FingerprintOptions) is NOT re-listed — the named
+          // base already re-lists it.
+          continue;
         }
       }
       if ((p.flags & SymbolFlags.Method) !== 0) {
@@ -787,8 +877,20 @@ export class Ts7Assembler {
           continue;
         }
         const spDecl = sp.declarations?.[0]?.resolve(this.project);
-        if (!spDecl || spDecl.parent !== decl) {
+        if (!spDecl) {
           continue;
+        }
+        if (spDecl.parent !== decl) {
+          // Same declaring-type logic as the instance loop: statics declared on
+          // an *erased* (private/internal/unexported) base are re-listed on this
+          // type (strada blends erased-base declarations into the member walk);
+          // statics declared on an exported/foreign named base are not.
+          const ownerTypeSym = spDecl.parent ? this.checker.getTypeAtLocation(spDecl.parent)?.getSymbol?.() : undefined;
+          const ownerId = ownerTypeSym?.id;
+          const isOwn = ownerId != null && ownerId === sym?.id;
+          if (!isOwn && !(ownerId != null && erasedBaseSymIds.has(ownerId))) {
+            continue;
+          }
         }
         if ((spDecl.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.PrivateKeyword)) {
           continue;

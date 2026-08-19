@@ -32,7 +32,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TS7_DIR="${REPO_ROOT}/.ts7"
 
 TSGO_REPO="${TSGO_REPO:-https://github.com/WinterYukky/typescript-go.git}"
-TSGO_REF="${TSGO_REF:-draft/api-emit-1784711177}"
+TSGO_REF="${TSGO_REF:-toolchain/e1-batch-docs}"
 # Optional S3 prefix for the toolchain build cache (e.g. s3://my-bucket/prefix).
 # When unset, the toolchain is always built from source and never uploaded.
 S3_CACHE="${S3_CACHE:-}"
@@ -81,9 +81,22 @@ command -v go >/dev/null 2>&1 || { log "ERROR: go is required to build tsgo"; ex
 log "go version: $(go version)"
 
 BUILD_DIR="${TS7_DIR}/src-typescript-go"
-git clone --depth 1 --branch "${TSGO_REF}" "${TSGO_REPO}" "${BUILD_DIR}" 2>/dev/null \
-  || git clone "${TSGO_REPO}" "${BUILD_DIR}"
-( cd "${BUILD_DIR}" && git checkout "${COMMIT}" 2>/dev/null || true )
+# NOTE: TSGO_REF may be a branch/tag (fast shallow path) or a commit sha (full
+# clone + detached checkout). The checkout must FAIL HARD when the ref cannot be
+# materialized — a silent fallback here once built the fork's default branch
+# (which lacks the API patches) and poisoned the S3 cache.
+if git clone --depth 1 --branch "${TSGO_REF}" "${TSGO_REPO}" "${BUILD_DIR}" 2>/dev/null; then
+  :
+else
+  rm -rf "${BUILD_DIR}"
+  git clone "${TSGO_REPO}" "${BUILD_DIR}"
+  ( cd "${BUILD_DIR}" && git checkout --detach "${COMMIT}" )
+fi
+ACTUAL="$(cd "${BUILD_DIR}" && git rev-parse HEAD)"
+if [ "${ACTUAL}" != "${COMMIT}" ]; then
+  log "ERROR: checked-out commit ${ACTUAL} != requested ${COMMIT}"
+  exit 1
+fi
 
 # 1) build the patched tsgo binary
 log "building tsgo (go build) ..."
@@ -106,6 +119,13 @@ for d in dist lib bin vendor; do
     cp -R "${NP_SRC}/${d}" "${TS7_DIR}/native-preview/${d}"
   fi
 done
+
+# Sanity check: the built client must expose the fork's API additions; a build
+# from the wrong ref (e.g. the un-patched default branch) is useless for jsii.
+if ! grep -q 'getFullyQualifiedName' "${TS7_DIR}/native-preview/dist/api/sync/api.js"; then
+  log "ERROR: built native-preview client lacks checker.getFullyQualifiedName — wrong ref built?"
+  exit 1
+fi
 
 echo "${COMMIT}" > "${STAMP}"
 
