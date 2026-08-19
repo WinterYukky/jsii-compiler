@@ -30,15 +30,16 @@ short, enumerated list of known differences, not a structural gap. The
 emitted JavaScript and declaration files are byte-identical on all three
 packages, including the injected runtime type information.
 
-The API surface was missing two capabilities jsii needs. We contributed one
-upstream: `checker.getFullyQualifiedName`, which jsii uses to derive
-`symbolId`, merged as microsoft/typescript-go#4700. The TypeScript team
-shipped the other, an emit API whose outputs a tool can post-process, in
-microsoft/typescript-go#4699. No API gaps remain for jsii's use case.
+When we started this validation, the API was missing two capabilities jsii
+needs. We contributed one upstream: `checker.getFullyQualifiedName`, which
+jsii uses to derive `symbolId` (merged as microsoft/typescript-go#4700). The
+TypeScript team shipped the other, an emit API whose outputs a tool can
+post-process, while we were validating (microsoft/typescript-go#4699). Both
+gaps are closed today.
 
 This is a feasibility validation, not a finished migration. The backend
-lives on a fork behind an experimental flag, we validated three packages,
-and the 0.1% member tail on `aws-cdk-lib` is still open.
+lives on a fork, we validated three packages, and the 0.1% member tail on
+`aws-cdk-lib` is still open.
 
 ## Performance
 
