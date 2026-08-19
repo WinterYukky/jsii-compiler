@@ -818,6 +818,27 @@ export class Ts7Assembler {
     // One RPC for all member docs of this type (instance + static).
     this._prefetchDocs([...instanceProps, ...staticPropsForPrefetch]);
 
+    // Constructor parameter properties are only listed for the EFFECTIVE
+    // constructor — the first constructor found on the type itself or along its
+    // erased-base chain (strada visits param-props exclusively from that
+    // signature). Param-props of a non-effective erased-base constructor (e.g.
+    // when the subclass declares its own constructor) are NOT re-listed.
+    let effectiveCtorOwnerId: unknown;
+    if (!isInterface) {
+      if ((decl.members ?? []).some((m: any) => m.kind === SyntaxKind.Constructor)) {
+        effectiveCtorOwnerId = sym?.id;
+      } else {
+        for (const eb of erasedBases) {
+          const s = eb.getSymbol?.() ?? eb.symbol;
+          const ebDecl = s?.declarations?.[0]?.resolve(this.project);
+          if (ebDecl && (ebDecl.members ?? []).some((m: any) => m.kind === SyntaxKind.Constructor)) {
+            effectiveCtorOwnerId = s.id;
+            break;
+          }
+        }
+      }
+    }
+
     for (const p of instanceProps) {
       if (this._isInternal(p)) {
         continue;
@@ -834,7 +855,12 @@ export class Ts7Assembler {
       }
       const isParamProp = pDecl.kind === SyntaxKind.Parameter;
       const owner = isParamProp ? pDecl.parent?.parent : pDecl.parent;
-      if (owner !== decl) {
+      if (isParamProp) {
+        const ownerId = owner === decl ? sym?.id : this.checker.getTypeAtLocation(owner)?.getSymbol?.()?.id;
+        if (ownerId == null || ownerId !== effectiveCtorOwnerId) {
+          continue;
+        }
+      } else if (owner !== decl) {
         // Resolve the *declaring* type of this member via the owner declaration
         // node's type symbol. NOTE: do NOT use `p.getParent()` here — for a member
         // obtained from getPropertiesOfType(type) that returns the *queried* type
@@ -1043,7 +1069,12 @@ export class Ts7Assembler {
       return false;
     }
     // must be the built-in Array from the standard library (not a user type)
-    const declPath = tsym?.declarations?.[0]?.path ?? '';
+    return this._isStdlibDecl(tsym);
+  }
+
+  /** Whether the symbol's first declaration lives in a standard-library lib.*.d.ts. */
+  private _isStdlibDecl(sym: any): boolean {
+    const declPath = sym?.declarations?.[0]?.path ?? '';
     return declPath.includes('/lib.') || declPath.includes('lib.es') || /lib\.[^/]*\.d\.ts$/.test(declPath);
   }
 
@@ -1094,8 +1125,21 @@ export class Ts7Assembler {
       return { collection: { elementtype: this._typeReference(args[0]), kind: 'array' } };
     }
     const sym = type.getSymbol();
-    if (sym && sym.name === 'Date' && (sym.declarations?.[0]?.path ?? '').includes('/lib.')) {
-      return { primitive: 'date' };
+    // Boxed standard-library wrapper types map to primitives (strada's
+    // _tryMakePrimitiveType): e.g. `limit?: Number` or `Array<String>`.
+    if (sym && this._isStdlibDecl(sym)) {
+      switch (sym.name) {
+        case 'Boolean':
+          return { primitive: 'boolean' };
+        case 'Date':
+          return { primitive: 'date' };
+        case 'Number':
+          return { primitive: 'number' };
+        case 'String':
+          return { primitive: 'string' };
+        default:
+          break;
+      }
     }
     if (sym) {
       const target = type.isTypeReference() ? type.getTarget() : type;
