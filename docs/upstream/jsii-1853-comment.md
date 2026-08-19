@@ -1,27 +1,27 @@
 <!--
 Draft comment for aws/jsii-compiler#1853 ("jsii & TypeScript native").
-Final version — paste as-is.
+Final version — paste as-is. Add the greeting line on top when posting.
 -->
 
-We tested whether jsii can run on the TypeScript 7 (`tsgo`) programmatic API
+I tested whether jsii can run on the TypeScript 7 (`tsgo`) programmatic API
 by building an experimental backend on a fork and validating it against real
 packages. The backend produces output that matches the current compiler
-exactly on all three packages we tested, and the jsii compile step on
+exactly on all three packages I tested, and the jsii compile step on
 `aws-cdk-lib` went from 119 seconds to 34 seconds, a 3.5x improvement. Both
 figures are 3-run medians of the full jsii step (type check, assembly, and
 emit) on the same EC2 c7i.4xlarge (Ubuntu 24.04, Node 22).
 
-## What we built and how we validated it
+## What I built and how I validated it
 
 The experimental backend reimplements the compiler interactions of jsii's
 Assembler and emitter on top of `@typescript/native-preview`. The existing
-compilation path is untouched, so we can compile the same package with both
-backends and compare everything they produce.
+compilation path is untouched, so the same package can be compiled with both
+backends and everything they produce compared directly.
 
 jsii produces two kinds of output. The first is the `.jsii` assembly, the
 model of exported types, members, and documentation that binding generators
 consume. The second is the compiled JavaScript and declaration files, which
-jsii post-processes to inject runtime type information. We compared both on
+jsii post-processes to inject runtime type information. I compared both on
 three packages of increasing size: `constructs`, `cloud-assembly-schema`,
 and `aws-cdk-lib` (21,192 types, 102,570 members).
 
@@ -32,20 +32,17 @@ are byte-identical as well, including the injected runtime type information.
 
 ## Artifacts
 
-The experimental backend and the full measurement history are on the fork:
+The experimental backend and the full measurement history are on my fork:
 https://github.com/WinterYukky/jsii-compiler/tree/feat/ts7-backend-1784773376.
-Happy to share more detail on any of it.
+Happy to share more detail on any of it, and if a different route than a
+draft PR is easier to review, I'll follow your lead.
 
-Would it be OK to start by opening a draft PR that adds this backend behind
-an experimental flag, so you can poke at it directly? If a different route
-is easier to review, we'll follow your lead.
-
-## Appendix A: How we got the performance
+## Appendix A: How I got the performance
 
 The 3.5x above is not the number of a naive port. The new API runs the
 compiler as a separate Go process, and every checker query is a synchronous
-RPC round-trip; our first working version issued roughly 950,000 of them for
-a single `aws-cdk-lib` compile. From there we changed one variable at a time
+RPC round-trip; my first working version issued roughly 950,000 of them for
+a single `aws-cdk-lib` compile. From there I changed one variable at a time
 and measured, re-running the parity checks above after every change (all
 numbers 3-run medians).
 
@@ -69,20 +66,20 @@ number of requests improved it almost linearly.
 
 Gains beyond this point live in the typescript-go API surface
 (batch-oriented traversal, pipelining on the RPC channel) rather than in
-anything jsii can do alone. We think these measurements are worth having on
-the typescript-go side too, so we are filing them there separately.
+anything jsii can do alone. I think these measurements are worth having on
+the typescript-go side too, so I am filing them there separately.
 
 ## Appendix B: Notes
 
-When we started this validation, the API was missing two capabilities jsii
-needs. We contributed one upstream, `checker.getFullyQualifiedName`, which
+When I started this validation, the API was missing two capabilities jsii
+needs. I contributed one upstream, `checker.getFullyQualifiedName`, which
 jsii uses to derive `symbolId` (merged as microsoft/typescript-go#4700).
-While we were validating, the TypeScript team shipped the other, an emit API
+While I was validating, the TypeScript team shipped the other, an emit API
 whose outputs a tool can post-process (microsoft/typescript-go#4699). Both
-gaps are closed today. We also found that tsgo's doc APIs currently resolve
+gaps are closed today. I also found that tsgo's doc APIs currently resolve
 parameter JSDoc differently from TypeScript 5 (inheriting `@param` from base
 declarations too eagerly, and dropping some tags). The backend reads
-documentation directly from source text to work around this, and we are
+documentation directly from source text to work around this, and I am
 reporting the difference upstream with a reproduction and a proposed fix.
 
 This is a feasibility validation, not a finished migration and not a
