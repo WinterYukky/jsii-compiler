@@ -10,25 +10,27 @@
 
 This PR adds an opt-in, experimental compiler backend that runs jsii's type analysis and emit on TypeScript 7 (typescript-go) through the `@typescript/native-preview` programmatic API. It is the draft follow-up to the investigation discussed in issue 1853 (see my comment there for the full measurement series).
 
-The headline result: on `aws-cdk-lib`, the check+assemble step drops from ~119s to ~32s (about 3.7x) while producing an assembly that is 100% identical to the classic backend's output — every type, member, parameter and doc field (21,192 types / 102,570 members).
+On `aws-cdk-lib`, the check+assemble step drops from ~119s to ~33s on the same machine, while producing a `.jsii` type space with zero differences against the classic backend's output across 21,192 types and 102,570 members.
 
 ## How it works
 
-The backend is selected with an environment variable and is off by default: `JSII_COMPILER_BACKEND=ts7 jsii ...`. Nothing on the classic TypeScript 5 path changes; when the variable is unset, the code path is byte-for-byte the one that exists today.
+The backend is selected with an environment variable and is off by default: `JSII_COMPILER_BACKEND=ts7 jsii ...`. When the variable is unset, nothing on the classic TypeScript 5 path changes — the ts7 backend lives in a separate `Compiler.emitTs7()` method, and the toolchain is only loaded when the flag is set (`main.ts` consults a dependency-free env probe).
 
 The TS7 API is out-of-process (a Node client talking to the tsgo Go server over JSON-RPC with object handles), so the backend does not try to make tsgo look like `ts.Program` / `ts.TypeChecker`. Wrapping every AST node to imitate the classic object shapes would break WeakMap identity assumptions and add per-node overhead. Instead, `src/ts7/` contains a TS7-native implementation with three parts:
 
 - `ts7-host.ts` — API session/snapshot lifecycle (open project, obtain program + checker handles).
-- `assembler.ts` — a TS7-native assembler that walks module exports and produces the `spec.Assembly`, porting strada's semantics exactly (submodule attribution, member re-listing across erased bases, enum members from union constituents, parameter documentation incl. TS5's `findBaseOfDeclaration` fallback, jsii's `splitSummary`, deprecation handling with `--strip-deprecated` allowlists, etc.).
-- `ts7-emit.ts` — post-emit pipeline: declaration emit, jsii rtti injection into the emitted `.js`, and `.jsii.tabl.json` generation.
+- `assembler.ts` — a TS7-native assembler that walks module exports and produces the `spec.Assembly`, porting the classic assembler's semantics exactly (submodule attribution, member re-listing across erased bases, enum members from union constituents, parameter documentation incl. TS5's `findBaseOfDeclaration` fallback, jsii's `splitSummary`, deprecation handling with `--strip-deprecated` allowlists, the `isInterfaceName` datatype rule, etc.). The assembly header (name/version/targets/metadata/readme/dependency closure/...) is populated from the same `ProjectInfo` the classic path uses; `jsiiVersion` is stamped with the real compiler version plus an `(ts7 experimental)` marker.
+- `ts7-emit.ts` — post-emit pipeline: whole-project emit through the API (the server writes outputs to disk and returns file names, so the multi-hundred-MB emit payload never crosses the RPC channel), then jsii rtti injection into the class-bearing `.js` files.
 
-The tsgo build the backend runs against needs a few API additions that are not yet in `@typescript/native-preview` releases (checker-side batching and doc APIs). Those are being proposed upstream to microsoft/typescript-go separately; `scripts/ts7-setup.sh` builds the pinned toolchain in the meantime. This is the main reason the PR is a draft: the backend cannot run against a stock npm release yet.
+TypeScript compilation errors are surfaced before assembling and fail the build, same as the classic backend. An emit failure fails the build with a synthetic diagnostic.
+
+The backend runs against a tsgo toolchain built from `microsoft/typescript-go` `main` — every API it requires is upstream today (including `checker.getFullyQualifiedName`, upstreamed as part of this work, and the whole-project `emit()`). `scripts/ts7-setup.sh` builds that toolchain. A fork ref with a proposed batched symbol-documentation API can be used as a faster option; without it the backend transparently falls back to per-symbol documentation requests (same output, more round-trips).
 
 ## Parity results
 
-Parity is verified with a structural diff over the full `.jsii` output (every type, every member, every parameter, every doc field), comparing the ts7 backend against the classic backend on the same source tree:
+Parity is verified with a structural diff of the `.jsii` type space, comparing the ts7 backend against the classic backend on the same source tree (`scripts/ts7-compare-jsii.mjs`, included in this PR). Compared per type: kind, base, interfaces, abstract/datatype flags, symbolId, enum members, and every property/method/initializer signature including parameter documentation and the stability/deprecated/default doc tags. Numbers are matched/total:
 
-| Package | Types | Members | Field diffs |
+| Package | Types | Members | Differences |
 |---|---:|---:|---:|
 | `constructs` | 12/12 | 53/53 | 0 |
 | `cloud-assembly-schema` | 59/59 | 213/213 | 0 |
@@ -38,20 +40,43 @@ For `constructs`, the emit side is additionally verified: identical emitted file
 
 ## Performance
 
-Measured on a c7i.4xlarge (16 vCPU), `aws-cdk-lib` with `--strip-deprecated`, 3-run median: classic backend ~119s for check+assemble; ts7 backend ~32-34s wall clock (~472k RPC requests, ~13.5s tsgo server time, remainder split between transport overhead and Node-side assembly).
+Measured on a c7i.4xlarge (16 vCPU), `aws-cdk-lib` with `--strip-deprecated`, 3-run median: the classic backend takes ~119s for check+assemble; the ts7 backend takes ~33s wall clock including the full semantic diagnostics pass (~472k RPC requests; roughly 13.5s tsgo server time, the remainder split between transport overhead and Node-side assembly).
 
 The dominant remaining cost is the synchronous request-per-symbol RPC pattern; the measurement series in issue 1853 discusses which API-side changes (batching, async pipelining) would unlock further gains.
 
 ## What this PR is NOT
 
-- It is not a proposal to switch jsii to TypeScript 7, nor to change the default backend. The classic path remains the default and is untouched.
-- It is not a language-feature upgrade: the ts7 backend intentionally compiles with the same target/lib semantics the classic backend uses today.
-- It does not (yet) implement `.warnings.jsii.js` generation (deprecation warnings injection) or the deprecated-remover emit surgery; packages using those flags still need the classic backend.
-- It does not run against a stock `@typescript/native-preview` release; it needs the pinned toolchain until the API additions land upstream.
+- It is not a proposal to switch jsii to TypeScript 7, nor to change the default backend. The classic path remains the default and is untouched when the flag is unset.
+- jsii's own `JSII_xxxx` diagnostics (the error/warning suite from `src/jsii-diagnostic.ts`) are not produced on this path — it targets valid jsii libraries and normal-path parity only. TypeScript compile errors do fail the build.
+- Known divergences from the classic assembler, documented in `src/ts7/README.md`: the `@struct` doc-tag override and datatype propagation from base interfaces; symbolId remapping through `tscRootDir`/`tscOutDir` for out-of-source layouts consumed as dependencies; submodule entries are declared but not yet enriched (readme/symbolId/locationInModule/targets).
+- Multi-language generation (pacmak) on a ts7-produced assembly has not been exercised yet.
+- `--watch` is rejected with an explicit error; `--add-deprecation-warnings` (`.warnings.jsii.js`) and the deprecated-remover emit surgery are not implemented.
+- It does not run against a stock `@typescript/native-preview` npm release; the programmatic API is not shipped in a stable form yet, so the toolchain is built from typescript-go source.
+
+## Try it
+
+```sh
+# one-time toolchain build (Go >= 1.24 and git required; set S3_CACHE=s3://... to reuse prebuilt tarballs)
+./scripts/ts7-setup.sh
+
+# then, in any jsii package:
+JSII_COMPILER_BACKEND=ts7 npx jsii
+
+# parity check against the classic backend:
+npx jsii                                   # produces the reference .jsii
+JSII_COMPILER_BACKEND=ts7 npx jsii         # produces the ts7 .jsii
+node scripts/ts7-compare-jsii.mjs ref.jsii ts7.jsii
+```
+
+## Feedback wanted
+
+- Is an environment-variable opt-in (`JSII_COMPILER_BACKEND=ts7`) the right shape for an experimental backend, or would you prefer a CLI flag / package.json setting?
+- Is a separate TS7-native assembler acceptable as the integration strategy while the TS7 API stabilizes, or should the effort go into abstracting `src/assembler.ts` over both object models from the start? (The trade-offs are documented in `src/ts7/README.md`.)
+- What parity/verification gates would you want to see before this could graduate from experimental (e.g. pacmak round-trip on a ts7 assembly, the full jsii-calc fixture suite, additional real-world libraries)?
 
 ## Testing done
 
-- Full existing test suite (`npx jest` + `eslint`) passes with the backend code merged and the flag unset — the classic path is regression-free.
-- Parity gates as described above on `constructs`, `cloud-assembly-schema`, and `aws-cdk-lib`, rebuilt from this branch.
-- Emit byte-identity gate on `constructs` (file set, `.d.ts` bytes, runtime rtti).
-- The typescript-go API additions the backend depends on carry their own Go tests and the `@typescript/native-preview` npm suite in the upstream proposals.
+- Full existing test suite plus new toolchain-free unit tests for the backend's pure logic (`npx jest`: 453 tests) and `eslint` — all passing with the flag unset, so the classic path is regression-free.
+- Parity gates as described above on `constructs`, `cloud-assembly-schema`, and `aws-cdk-lib`, rebuilt from this branch, with both the upstream-main toolchain (per-symbol documentation fallback path) and the batched-API fork toolchain.
+- Emit verification on `constructs` (file set, `.d.ts` bytes, runtime rtti).
+- The typescript-go API additions the backend can take advantage of carry their own Go tests and the `@typescript/native-preview` npm suite in the upstream proposals.
