@@ -10,7 +10,7 @@
 
 This PR adds an opt-in, experimental compiler backend that runs jsii's type analysis and emit on TypeScript 7 (typescript-go) through the `@typescript/native-preview` programmatic API. It is the draft follow-up to the investigation discussed in issue 1853 (see my comment there for the full measurement series).
 
-On `aws-cdk-lib`, the check+assemble step drops from ~119s to ~33s on the same machine, while producing a `.jsii` type space with zero differences against the classic backend's output across 21,192 types and 102,570 members.
+On `aws-cdk-lib`, the check+assemble step drops from ~119s to ~48s on the same machine (including a full semantic diagnostics pass; ~33s without it), while producing a `.jsii` type space with zero differences against the classic backend's output across 21,192 types and 102,572 members.
 
 ## How it works
 
@@ -24,7 +24,7 @@ The TS7 API is out-of-process (a Node client talking to the tsgo Go server over 
 
 TypeScript compilation errors are surfaced before assembling and fail the build, same as the classic backend. An emit failure fails the build with a synthetic diagnostic.
 
-The backend runs against a tsgo toolchain built from `microsoft/typescript-go` `main` — every API it requires is upstream today (including `checker.getFullyQualifiedName`, upstreamed as part of this work, and the whole-project `emit()`). `scripts/ts7-setup.sh` builds that toolchain. A fork ref with a proposed batched symbol-documentation API can be used as a faster option; without it the backend transparently falls back to per-symbol documentation requests (same output, more round-trips).
+The backend runs against a tsgo toolchain built from `microsoft/typescript-go`, pinned to the final commit of that staging repo (which was closed in August 2026 when the TypeScript 7 native port moved back into `microsoft/TypeScript`). Every API the backend requires is in that pin, including `checker.getFullyQualifiedName` (upstreamed as part of this work) and the whole-project `emit()`. `scripts/ts7-setup.sh` builds the toolchain. A fork ref with a proposed batched symbol-documentation API also works; without it the backend transparently falls back to per-symbol documentation requests, and the measured difference is negligible (~48s vs ~49s on aws-cdk-lib), so there is no fork dependency in practice.
 
 ## Parity results
 
@@ -34,13 +34,15 @@ Parity is verified with a structural diff of the `.jsii` type space, comparing t
 |---|---:|---:|---:|
 | `constructs` | 12/12 | 53/53 | 0 |
 | `cloud-assembly-schema` | 59/59 | 213/213 | 0 |
-| `aws-cdk-lib` (`--strip-deprecated`) | 21192/21192 | 102570/102570 | 0 |
+| `aws-cdk-lib` (`--strip-deprecated`) | 21192/21192 | 102572/102572 | 0 |
+
+All three gates were run twice — once with the pinned upstream toolchain (per-symbol documentation path) and once with the batched-API fork toolchain — with identical results.
 
 For `constructs`, the emit side is additionally verified: identical emitted file set, byte-identical `.d.ts` output, and runtime-identical `Symbol.for("jsii.rtti")` on every exported class.
 
 ## Performance
 
-Measured on a c7i.4xlarge (16 vCPU), `aws-cdk-lib` with `--strip-deprecated`, 3-run median: the classic backend takes ~119s for check+assemble; the ts7 backend takes ~33s wall clock including the full semantic diagnostics pass (~472k RPC requests; roughly 13.5s tsgo server time, the remainder split between transport overhead and Node-side assembly).
+Measured on a c7i.4xlarge (16 vCPU), `aws-cdk-lib` with `--strip-deprecated`: the classic backend takes ~119s for check+assemble; the ts7 backend takes ~48s wall clock, of which ~15s is the full semantic diagnostics pass (the backend runs it by default so that TypeScript errors reject the build exactly like the classic path). The type analysis itself issues ~472k RPC requests (roughly 13.5s tsgo server time, the remainder split between transport overhead and Node-side assembly).
 
 The dominant remaining cost is the synchronous request-per-symbol RPC pattern; the measurement series in issue 1853 discusses which API-side changes (batching, async pipelining) would unlock further gains.
 
