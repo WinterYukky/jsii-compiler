@@ -1,0 +1,2 @@
+# upstream patches must keep their original line endings byte-for-byte (git am)
+*.patch -text

@@ -1,0 +1,88 @@
+diff --git a/src/ts7/assembler.ts b/src/ts7/assembler.ts
+index 8ee12ce..d5af8db 100644
+--- a/src/ts7/assembler.ts
++++ b/src/ts7/assembler.ts
+@@ -35,12 +35,15 @@ import { createRequire } from 'node:module';
+ import * as path from 'node:path';
+ import * as zlib from 'node:zlib';
+ import * as spec from '@jsii/spec';
++import * as log4js from 'log4js';
+ 
+ import type { ProjectInfo } from '../project-info';
+ import { SHORT_VERSION, VERSION } from '../version';
+ import { Ts7Api } from './ts7-api';
+ import { Ts7Project } from './ts7-host';
+ 
++const LOG = log4js.getLogger('jsii/ts7');
++
+ export interface Ts7AssemblerOptions {
+   /** package.json contents of the package being assembled. */
+   readonly packageJson: any;
+@@ -94,6 +97,7 @@ export class Ts7Assembler {
+   // the symbol's declaration coordinate (path:index), which is stable.
+   private readonly _jsDocTagsCache = new Map<string, any[]>();
+   private readonly _docCommentCache = new Map<string, any>();
++  private _batchModeLogged = false;
+   private readonly _sourceTextCache = new Map<string, string>();
+   private _docCacheHits = 0;
+ 
+@@ -247,16 +251,31 @@ export class Ts7Assembler {
+    * evolves. No-ops gracefully when batching is unavailable.
+    */
+   private _prefetchDocs(syms: any[]): void {
++    if (!process.env.JSII_TS7_BATCH) {
++      return;
++    }
+     const api = this.project.api;
++    // Prefer a dedicated server-side endpoint when the toolchain provides one
++    // (one request per chunk, results computed in-process on the server);
++    // otherwise fall back to the client-side request batching combinator.
++    const serverSide = typeof this.checker.getSymbolDocumentations === 'function';
+     if (
+-      !process.env.JSII_TS7_BATCH ||
+-      typeof api?.batch !== 'function' ||
+-      typeof this.ts7.all !== 'function' ||
+-      typeof this.checker.getJsDocTagsOfSymbol?.gen !== 'function' ||
+-      typeof this.checker.getDocumentationCommentOfSymbol?.gen !== 'function'
++      !serverSide &&
++      (typeof api?.batch !== 'function' ||
++        typeof this.ts7.all !== 'function' ||
++        typeof this.checker.getJsDocTagsOfSymbol?.gen !== 'function' ||
++        typeof this.checker.getDocumentationCommentOfSymbol?.gen !== 'function')
+     ) {
+       return;
+     }
++    if (!this._batchModeLogged) {
++      this._batchModeLogged = true;
++      LOG.info(
++        `ts7 backend: documentation batching via ${
++          serverSide ? 'server-side getSymbolDocumentations' : 'client-side api.batch'
++        }`,
++      );
++    }
+     const wanted: any[] = [];
+     const keys: string[] = [];
+     const seen = new Set<string>();
+@@ -277,10 +296,18 @@ export class Ts7Assembler {
+     const CHUNK = 1000;
+     for (let i = 0; i < wanted.length; i += CHUNK) {
+       const chunk = wanted.slice(i, i + CHUNK);
+-      const [tags, comments] = api.batch(
+-        this.ts7.all(...chunk.map((sym) => this.checker.getJsDocTagsOfSymbol.gen(sym))),
+-        this.ts7.all(...chunk.map((sym) => this.checker.getDocumentationCommentOfSymbol.gen(sym))),
+-      );
++      let tags: any[];
++      let comments: any[];
++      if (serverSide) {
++        const docs = this.checker.getSymbolDocumentations(chunk);
++        tags = docs.map((d: any) => d?.tags ?? []);
++        comments = docs.map((d: any) => d?.comment ?? '');
++      } else {
++        [tags, comments] = api.batch(
++          this.ts7.all(...chunk.map((sym) => this.checker.getJsDocTagsOfSymbol.gen(sym))),
++          this.ts7.all(...chunk.map((sym) => this.checker.getDocumentationCommentOfSymbol.gen(sym))),
++        );
++      }
+       for (let j = 0; j < chunk.length; j++) {
+         const key = keys[i + j];
+         const comment = comments[j] ?? '';

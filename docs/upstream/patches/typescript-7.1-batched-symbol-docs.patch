@@ -1,0 +1,405 @@
+From 29ed84c6a103b87048fd66121d4873c2db4259de Mon Sep 17 00:00:00 2001
+From: WinterYukky <49480575+WinterYukky@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 01:24:13 +0900
+Subject: [PATCH] API: add batched getSymbolDocumentations (JSDoc tags +
+ documentation comment for many symbols in one request)
+
+Clients that document large libraries (e.g. jsii generating multi-language
+bindings for aws-cdk-lib) need the JSDoc tags and the rendered documentation
+comment for every exported symbol. Doing that with the per-symbol
+getJsDocTags / getDocumentationComment methods costs two round-trips per
+symbol, and routing those through the generic batchRequests mechanism was
+measured to be slower than the individual calls on 7.1.0-beta because the
+per-request payload encoding dominates.
+
+This adds a dedicated checker method, getSymbolDocumentations(symbols), that
+returns, per input symbol and in input order, exactly what the two individual
+methods would return. The server resolves every symbol against the same
+checker setup; a symbol that would fail the individual call fails the batch
+the same way. The sync API and proto typings are regenerated, and tests cover
+parity with the individual calls plus the sync/generator equivalence.
+---
+ packages/typescript/src/api/async/api.ts      | 20 +++++++++
+ packages/typescript/src/api/async/types.ts    |  5 +++
+ .../typescript/src/api/proto.generated.ts     | 22 ++++++++++
+ packages/typescript/src/api/sync/api.ts       | 41 +++++++++++++++++++
+ packages/typescript/src/api/sync/types.ts     |  5 +++
+ packages/typescript/test/async/api.test.ts    | 21 ++++++++++
+ .../test/sync/api-generators.test.ts          |  1 +
+ packages/typescript/test/sync/api.test.ts     | 21 ++++++++++
+ tsc/internal/api/proto.go                     | 17 ++++++++
+ tsc/internal/api/session.go                   | 36 ++++++++++++++++
+ 10 files changed, 189 insertions(+)
+
+diff --git a/packages/typescript/src/api/async/api.ts b/packages/typescript/src/api/async/api.ts
+index 6d2f3d4fa..b6dbb233e 100644
+--- a/packages/typescript/src/api/async/api.ts
++++ b/packages/typescript/src/api/async/api.ts
+@@ -174,6 +174,7 @@ import type {
+     StringMappingType,
+     StructuredType,
+     SubstitutionType,
++    SymbolDocumentation,
+     TemplateLiteralType,
+     ThisTypePredicate,
+     TupleType,
+@@ -251,6 +252,7 @@ export type {
+     StringMappingType,
+     StructuredType,
+     SubstitutionType,
++    SymbolDocumentation,
+     SyntheticProjectId,
+     TemplateLiteralType,
+     TextEdit,
+@@ -3102,6 +3104,24 @@ export class Checker {
+         });
+     }
+ 
++    /**
++     * Batched equivalent of calling {@link getJsDocTagsOfSymbol} and
++     * {@link getDocumentationCommentOfSymbol} for each symbol: a single request
++     * returns, per input symbol (order preserved), exactly what the two
++     * individual calls would return.
++     */
++    async getSymbolDocumentations(symbols: readonly Symbol[]): Promise<readonly SymbolDocumentation[]> {
++        if (symbols.length === 0) {
++            return [];
++        }
++        const data = await this.client.apiRequest("getSymbolDocumentations", {
++            snapshot: this.snapshotId,
++            project: this.project.id,
++            symbols: symbols.map(s => s.reference),
++        });
++        return (data ?? []).map(d => ({ tags: d?.tags ?? [], comment: d?.comment ?? "" }));
++    }
++
+     /**
+      * Get the type arguments of a type reference (e.g. the `string` in `Array<string>`).
+      */
+diff --git a/packages/typescript/src/api/async/types.ts b/packages/typescript/src/api/async/types.ts
+index e1c7e0c87..12a3226d0 100644
+--- a/packages/typescript/src/api/async/types.ts
++++ b/packages/typescript/src/api/async/types.ts
+@@ -372,6 +372,11 @@ export interface IndexInfo {
+ /**
+  * A single JSDoc tag attached to a symbol — e.g. `@param`, `@returns`.
+  */
++/** JSDoc tags and rendered documentation comment of one symbol (see `Checker.getSymbolDocumentations`). */
++export interface SymbolDocumentation {
++    readonly tags: readonly JSDocTagInfo[];
++    readonly comment: string;
++}
+ export interface JSDocTagInfo {
+     /** The tag name, without the leading `@` — e.g. `"param"`. */
+     readonly name: string;
+diff --git a/packages/typescript/src/api/proto.generated.ts b/packages/typescript/src/api/proto.generated.ts
+index 01e2fa27b..24c70990b 100644
+--- a/packages/typescript/src/api/proto.generated.ts
++++ b/packages/typescript/src/api/proto.generated.ts
+@@ -178,6 +178,7 @@ export interface APIMethodInfo {
+     getMemberInModuleExports: APIMethod<GetMemberInModuleExportsParams, SymbolResponse | null>;
+     getJsDocTags: APIMethod<CheckerSymbolParams, JSDocTagInfo[] | null>;
+     getDocumentationComment: APIMethod<CheckerSymbolParams, string>;
++    getSymbolDocumentations: APIMethod<CheckerSymbolsParams, SymbolDocumentation[]>;
+     isArrayType: APIMethod<CheckerTypeParams, boolean>;
+     isReadonlySymbol: APIMethod<CheckerSymbolParams, boolean>;
+     getReferencesToSymbolInFile: APIMethod<GetReferencesToSymbolInFileParams, string[]>;
+@@ -946,6 +947,25 @@ export interface JSDocTagInfo {
+     text?: string | undefined;
+ }
+ 
++/**
++ * CheckerSymbolsParams is the batched form of CheckerSymbolParams: the same
++ * checker, many symbols.
++ */
++export interface CheckerSymbolsParams {
++    snapshot: number;
++    project: ProjectId;
++    symbols: readonly SymbolReference[] | null;
++}
++
++/**
++ * SymbolDocumentation carries, for one symbol, exactly what the individual
++ * "getJsDocTags" and "getDocumentationComment" methods would return.
++ */
++export interface SymbolDocumentation {
++    tags: JSDocTagInfo[] | null;
++    comment: string;
++}
++
+ /** GetReferencesToSymbolInFileParams are the parameters for the getReferencesToSymbolInFile method. */
+ export interface GetReferencesToSymbolInFileParams {
+     snapshot: number;
+@@ -1258,6 +1278,7 @@ export interface BatchRequest {
+         | "getSuggestionDiagnostics"
+         | "getSymbolAtLocation"
+         | "getSymbolAtPosition"
++        | "getSymbolDocumentations"
+         | "getSymbolOfDeclaration"
+         | "getSymbolOfDeclarationForChecker"
+         | "getSymbolOfNode"
+@@ -1440,6 +1461,7 @@ export interface BatchResponse {
+         | "getSuggestionDiagnostics"
+         | "getSymbolAtLocation"
+         | "getSymbolAtPosition"
++        | "getSymbolDocumentations"
+         | "getSymbolOfDeclaration"
+         | "getSymbolOfDeclarationForChecker"
+         | "getSymbolOfNode"
+diff --git a/packages/typescript/src/api/sync/api.ts b/packages/typescript/src/api/sync/api.ts
+index 3c938ec10..0f69a0676 100644
+--- a/packages/typescript/src/api/sync/api.ts
++++ b/packages/typescript/src/api/sync/api.ts
+@@ -191,6 +191,7 @@ import type {
+     StringMappingType,
+     StructuredType,
+     SubstitutionType,
++    SymbolDocumentation,
+     TemplateLiteralType,
+     ThisTypePredicate,
+     TupleType,
+@@ -268,6 +269,7 @@ export type {
+     StringMappingType,
+     StructuredType,
+     SubstitutionType,
++    SymbolDocumentation,
+     SyntheticProjectId,
+     TemplateLiteralType,
+     TextEdit,
+@@ -6431,6 +6433,45 @@ export class Checker {
+         );
+     }
+ 
++    /**
++     * Batched equivalent of calling {@link getJsDocTagsOfSymbol} and
++     * {@link getDocumentationCommentOfSymbol} for each symbol: a single request
++     * returns, per input symbol (order preserved), exactly what the two
++     * individual calls would return.
++     */
++    get getSymbolDocumentations(): {
++        (symbols: readonly Symbol[]): readonly SymbolDocumentation[];
++        gen(symbols: readonly Symbol[]): Generator<ProtocolRequest, readonly SymbolDocumentation[], ProtocolResponse["result"]>;
++    } {
++        const owner = this;
++        return cacheGeneratorMethod(
++            owner,
++            "getSymbolDocumentations",
++            function (symbols: readonly Symbol[]): readonly SymbolDocumentation[] {
++                if (symbols.length === 0) {
++                    return [];
++                }
++                const data = owner.client.apiRequest("getSymbolDocumentations", {
++                    snapshot: owner.snapshotId,
++                    project: owner.project.id,
++                    symbols: symbols.map(s => s.reference),
++                });
++                return (data ?? []).map(d => ({ tags: d?.tags ?? [], comment: d?.comment ?? "" }));
++            },
++            function* (symbols: readonly Symbol[]): Generator<ProtocolRequest, readonly SymbolDocumentation[], ProtocolResponse["result"]> {
++                if (symbols.length === 0) {
++                    return [];
++                }
++                const data = yield* apiRequest("getSymbolDocumentations", {
++                    snapshot: owner.snapshotId,
++                    project: owner.project.id,
++                    symbols: symbols.map(s => s.reference),
++                });
++                return (data ?? []).map(d => ({ tags: d?.tags ?? [], comment: d?.comment ?? "" }));
++            },
++        );
++    }
++
+     /**
+      * Get the type arguments of a type reference (e.g. the `string` in `Array<string>`).
+      */
+diff --git a/packages/typescript/src/api/sync/types.ts b/packages/typescript/src/api/sync/types.ts
+index 2f466b6b6..cb908dc47 100644
+--- a/packages/typescript/src/api/sync/types.ts
++++ b/packages/typescript/src/api/sync/types.ts
+@@ -511,6 +511,11 @@ export interface IndexInfo {
+ /**
+  * A single JSDoc tag attached to a symbol — e.g. `@param`, `@returns`.
+  */
++/** JSDoc tags and rendered documentation comment of one symbol (see `Checker.getSymbolDocumentations`). */
++export interface SymbolDocumentation {
++    readonly tags: readonly JSDocTagInfo[];
++    readonly comment: string;
++}
+ export interface JSDocTagInfo {
+     /** The tag name, without the leading `@` — e.g. `"param"`. */
+     readonly name: string;
+diff --git a/packages/typescript/test/async/api.test.ts b/packages/typescript/test/async/api.test.ts
+index b9ef5842d..abc4ce74b 100644
+--- a/packages/typescript/test/async/api.test.ts
++++ b/packages/typescript/test/async/api.test.ts
+@@ -7385,6 +7385,27 @@ export function add(a: number, b: number): number { return a + b; }
+         assert.ok(!doc.includes("@param"), "Documentation comment should not include tags");
+     });
+ 
++    test("getSymbolDocumentations returns, per symbol, what the individual calls return", async () => {
++        await using api = spawnAPI(docFiles);
++
++        const snapshot = await api.createSnapshot({ openProjects: ["/tsconfig.json"] });
++        const project = snapshot.getConfiguredProject("/tsconfig.json")!;
++        const checker = project.checker;
++        const addSymbol = await checker.getSymbolAtPosition("/src/main.ts", docFiles["/src/main.ts"].indexOf("add(a"));
++        assert.ok(addSymbol);
++        const paramSymbol = await checker.getSymbolAtPosition("/src/main.ts", docFiles["/src/main.ts"].indexOf("a: number"));
++        assert.ok(paramSymbol);
++        const symbols = [addSymbol, paramSymbol, addSymbol];
++        const batched = await checker.getSymbolDocumentations(symbols);
++        assert.equal(batched.length, symbols.length);
++        for (let i = 0; i < symbols.length; i++) {
++            assert.deepEqual(batched[i].tags, await checker.getJsDocTagsOfSymbol(symbols[i]));
++            assert.equal(batched[i].comment, await checker.getDocumentationCommentOfSymbol(symbols[i]));
++        }
++        assert.ok(batched[0].comment.includes("Adds two numbers together"));
++        assert.deepEqual(await checker.getSymbolDocumentations([]), []);
++    });
++
+     test("getJsDocTags returns structured tag name/text pairs", async () => {
+         await using api = spawnAPI(docFiles);
+ 
+diff --git a/packages/typescript/test/sync/api-generators.test.ts b/packages/typescript/test/sync/api-generators.test.ts
+index 55693c5cb..16e19edb2 100644
+--- a/packages/typescript/test/sync/api-generators.test.ts
++++ b/packages/typescript/test/sync/api-generators.test.ts
+@@ -1722,6 +1722,7 @@ describe("API - generator batching", { concurrency: areTestsFiltered() }, () =>
+                 parityCase("Checker", "getMemberInModuleExports", checker.getMemberInModuleExports, assertOptionalSymbolsEquivalent, moduleSymbol, "Derived"),
+                 parityCase("Checker", "getJsDocTagsOfSymbol", checker.getJsDocTagsOfSymbol, assertDeepEquivalent, combineSymbol),
+                 parityCase("Checker", "getDocumentationCommentOfSymbol", checker.getDocumentationCommentOfSymbol, assertDeepEquivalent, combineSymbol),
++                parityCase("Checker", "getSymbolDocumentations", checker.getSymbolDocumentations, assertDeepEquivalent, [combineSymbol, localCombineSymbol]),
+                 parityCase("Checker", "getTypeArguments", checker.getTypeArguments, assertTypeArraysEquivalent, boxedType),
+                 parityCase("Checker", "getNonMissingTypeOfSymbol", checker.getNonMissingTypeOfSymbol, assertTypesEquivalent, boxedOptSymbol),
+                 parityCase("Checker", "isReadonlySymbol", checker.isReadonlySymbol, assertDeepEquivalent, boxedOptSymbol),
+diff --git a/packages/typescript/test/sync/api.test.ts b/packages/typescript/test/sync/api.test.ts
+index dbe34fb1b..0e0309edf 100644
+--- a/packages/typescript/test/sync/api.test.ts
++++ b/packages/typescript/test/sync/api.test.ts
+@@ -7186,6 +7186,27 @@ export function add(a: number, b: number): number { return a + b; }
+         assert.ok(!doc.includes("@param"), "Documentation comment should not include tags");
+     });
+ 
++    test("getSymbolDocumentations returns, per symbol, what the individual calls return", () => {
++        using api = spawnAPI(docFiles);
++
++        const snapshot = api.createSnapshot({ openProjects: ["/tsconfig.json"] });
++        const project = snapshot.getConfiguredProject("/tsconfig.json")!;
++        const checker = project.checker;
++        const addSymbol = checker.getSymbolAtPosition("/src/main.ts", docFiles["/src/main.ts"].indexOf("add(a"));
++        assert.ok(addSymbol);
++        const paramSymbol = checker.getSymbolAtPosition("/src/main.ts", docFiles["/src/main.ts"].indexOf("a: number"));
++        assert.ok(paramSymbol);
++        const symbols = [addSymbol, paramSymbol, addSymbol];
++        const batched = checker.getSymbolDocumentations(symbols);
++        assert.equal(batched.length, symbols.length);
++        for (let i = 0; i < symbols.length; i++) {
++            assert.deepEqual(batched[i].tags, checker.getJsDocTagsOfSymbol(symbols[i]));
++            assert.equal(batched[i].comment, checker.getDocumentationCommentOfSymbol(symbols[i]));
++        }
++        assert.ok(batched[0].comment.includes("Adds two numbers together"));
++        assert.deepEqual(checker.getSymbolDocumentations([]), []);
++    });
++
+     test("getJsDocTags returns structured tag name/text pairs", () => {
+         using api = spawnAPI(docFiles);
+ 
+diff --git a/tsc/internal/api/proto.go b/tsc/internal/api/proto.go
+index 807244520..6c99bb8b0 100644
+--- a/tsc/internal/api/proto.go
++++ b/tsc/internal/api/proto.go
+@@ -215,6 +215,7 @@ const (
+ 	MethodGetMemberInModuleExports          Method = "getMemberInModuleExports"
+ 	MethodGetJSDocTags                      Method = "getJsDocTags"
+ 	MethodGetDocumentationComment           Method = "getDocumentationComment"
++	MethodGetSymbolDocumentations           Method = "getSymbolDocumentations"
+ 	MethodIsArrayType                       Method = "isArrayType"
+ 	MethodIsReadonlySymbol                  Method = "isReadonlySymbol"
+ 
+@@ -736,6 +737,7 @@ var unmarshalers = map[Method]func([]byte) (any, error){
+ 	MethodGetMemberInModuleExports:          unmarshallerFor[GetMemberInModuleExportsParams],
+ 	MethodGetJSDocTags:                      unmarshallerFor[CheckerSymbolParams],
+ 	MethodGetDocumentationComment:           unmarshallerFor[CheckerSymbolParams],
++	MethodGetSymbolDocumentations:           unmarshallerFor[CheckerSymbolsParams],
+ 	MethodIsArrayType:                       unmarshallerFor[CheckerTypeParams],
+ 	MethodIsReadonlySymbol:                  unmarshallerFor[CheckerSymbolParams],
+ 	MethodGetReferencesToSymbolInFile:       unmarshallerFor[GetReferencesToSymbolInFileParams],
+@@ -1857,6 +1859,21 @@ type CheckerSymbolParams struct {
+ 	Symbol   SymbolReference `json:"symbol"`
+ }
+ 
++// CheckerSymbolsParams is the batched form of CheckerSymbolParams: the same
++// checker, many symbols.
++type CheckerSymbolsParams struct {
++	Snapshot SnapshotID        `json:"snapshot"`
++	Project  project.ID        `json:"project"`
++	Symbols  []SymbolReference `json:"symbols"`
++}
++
++// SymbolDocumentation carries, for one symbol, exactly what the individual
++// "getJsDocTags" and "getDocumentationComment" methods would return.
++type SymbolDocumentation struct {
++	Tags    []*JSDocTagInfo `json:"tags"`
++	Comment string          `json:"comment"`
++}
++
+ // JSDocTagInfo is a single JSDoc tag, mirroring Strada's JSDocTagInfo but with the tag text
+ // rendered as a plain string rather than SymbolDisplayPart[].
+ type JSDocTagInfo struct {
+diff --git a/tsc/internal/api/session.go b/tsc/internal/api/session.go
+index 93d6ab53c..aa10a3fda 100644
+--- a/tsc/internal/api/session.go
++++ b/tsc/internal/api/session.go
+@@ -1177,6 +1177,8 @@ func (s *Session) HandleRequest(ctx context.Context, method string, params json.
+ 		return s.handleGetJSDocTags(ctx, parsed.(*CheckerSymbolParams))
+ 	case string(MethodGetDocumentationComment):
+ 		return s.handleGetDocumentationComment(ctx, parsed.(*CheckerSymbolParams))
++	case string(MethodGetSymbolDocumentations):
++		return s.handleGetSymbolDocumentations(ctx, parsed.(*CheckerSymbolsParams))
+ 	case string(MethodIsArrayType):
+ 		return s.handleIsArrayType(ctx, parsed.(*CheckerTypeParams))
+ 	case string(MethodIsReadonlySymbol):
+@@ -4947,6 +4949,40 @@ func (s *Session) handleGetDocumentationComment(ctx context.Context, params *Che
+ 	return ls.GetSymbolDocumentationComment(setup.checker, symbol), nil
+ }
+ 
++// handleGetSymbolDocumentations is the batched equivalent of calling
++// "getJsDocTags" and "getDocumentationComment" for each symbol. Each element of
++// the response carries exactly what the two individual methods would return for
++// the same symbol (input order preserved); a symbol that would fail the
++// individual call fails the batch the same way.
++func (s *Session) handleGetSymbolDocumentations(ctx context.Context, params *CheckerSymbolsParams) ([]*SymbolDocumentation, error) {
++	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)
++	if err != nil {
++		return nil, err
++	}
++	defer setup.done()
++
++	results := make([]*SymbolDocumentation, len(params.Symbols))
++	for i, ref := range params.Symbols {
++		symbol, err := setup.resolveSymbolHandle(ref)
++		if err != nil {
++			return nil, err
++		}
++		doc := &SymbolDocumentation{}
++		if symbol != nil {
++			tags := ls.GetSymbolJSDocTags(symbol)
++			if len(tags) > 0 {
++				doc.Tags = make([]*JSDocTagInfo, len(tags))
++				for j, tag := range tags {
++					doc.Tags[j] = &JSDocTagInfo{Name: tag.Name, Text: tag.Text}
++				}
++			}
++			doc.Comment = ls.GetSymbolDocumentationComment(setup.checker, symbol)
++		}
++		results[i] = doc
++	}
++	return results, nil
++}
++
+ // handleGetTypeArguments returns the type arguments of a type reference.
+ // @gen-proto-nullable
+ func (s *Session) handleGetTypeArguments(ctx context.Context, params *CheckerTypeParams) ([]*TypeResponse, error) {
+-- 
+2.43.0
+
