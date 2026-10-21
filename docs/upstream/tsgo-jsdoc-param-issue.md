@@ -1,12 +1,18 @@
-# Draft: microsoft/typescript-go issue — parameter JSDoc resolution diverges from TypeScript 5 services
+# Draft: microsoft/TypeScript issue — TypeScript 7.1 API: parameter JSDoc resolution diverges from the classic services
 
-> Paste-ready issue body. File as a bug against microsoft/typescript-go, then
-> follow up with the fix PR (branch `fix/jsdoc-param-inheritance-1787119427` on
-> WinterYukky/typescript-go). Keep issue-first order.
+> Paste-ready issue body. File as a bug against microsoft/TypeScript (the
+> typescript-go staging repo is closed; the Go port now lives there). The fix
+> from the earlier typescript-go branch (`fix/jsdoc-param-inheritance-1787119427`
+> on WinterYukky/typescript-go, Go-side `internal/ls/jsdoc.go`) still applies and
+> can be re-proposed there once the issue is acknowledged. Keep issue-first order.
+>
+> Re-verified 2026-10-21 against `typescript@7.1.0-beta` (`typescript/sync`):
+> all three divergences are still present; the runners below need only that
+> package (no Go toolchain).
 
 ---
 
-**Title:** API/LS: parameter JSDoc resolution diverges from TypeScript 5 services (`getDocumentationComment` / `getJsDocTags`)
+**Title:** TypeScript 7.1 API: parameter JSDoc resolution diverges from the classic services (`getDocumentationComment` / `getJsDocTags`)
 
 ## Summary
 
@@ -17,14 +23,14 @@ TypeScript 5's services layer in three ways:
    a parameter's documentation only comes from the hosting declaration's own
    JSDoc (`getJSDocParameterTags`); an overriding method's parameters never
    inherit `@param` text from the base class/interface signature, even when the
-   override has no JSDoc at all. typescript-go walks base-class members while
+   override has no JSDoc at all. The Go implementation walks base-class members while
    resolving the hosting method's JSDoc, so the base signature's `@param` leaks
    into the override's parameters.
 2. **Constructor parameters do not get TS5's base-property fallback.** In TS5,
    services `getDocumentationComment` applies `findBaseOfDeclaration` to a
    constructor parameter with no own `@param`: the documentation of a
    same-named PROPERTY on the first super type that has one is inherited
-   (recursing through undocumented overrides). typescript-go returns an empty
+   (recursing through undocumented overrides). The Go implementation returns an empty
    comment for these parameters.
 3. **`Symbol.getJsDocTags` returns no tags for parameter symbols.** In TS5 it
    returns the parameter's matching `@param` tag.
@@ -70,23 +76,30 @@ export class Tagged {
 For each parameter symbol (obtained from
 `checker.getSignatureFromDeclaration(...).getParameters()`), compare
 `getDocumentationComment(checker)` and `getJsDocTags(checker)` between
-TypeScript 5.x and `@typescript/native-preview`'s API:
+the classic compiler (verified with 5.x and 6.0) and `typescript@7.1.0-beta`'s `typescript/sync` API:
 
-| Symbol | TS 5 (expected) | typescript-go (actual) |
+| Symbol | classic TS (expected) | TS 7.1 `typescript/sync` (actual) |
 |---|---|---|
 | `PlainCapture.test` param `actual` — doc | `""` | `"the target to match"` (inherited from `MatcherBase.test`) |
 | `Counted` ctor param `count` — doc | `"How many widgets there are."` (from base property `WithCount.count`) | `""` |
 | `Tagged` ctor param `key` — tags | `[param: "key The string key for the tag."]` | `[]` |
 | `MatcherBase.test` param `actual` — tags | `[param: "actual the target to match"]` | `[]` |
 
-(TS5 side measured with `ts.createProgram` + `ts.displayPartsToString(sym.getDocumentationComment(checker))`;
-Go side via the `@typescript/native-preview` synchronous API. A paste-ready
-side-by-side runner is included in the linked PR discussion.)
+Classic side measured with `ts.createProgram` + `ts.displayPartsToString(sym.getDocumentationComment(checker))`;
+7.1 side via `typescript/sync` (`new API(...).createSnapshot(...)`). Both runners
+are in this directory next to `tsgo-jsdoc-param-repro.ts`:
+
+```sh
+npm i typescript@6 typescript7@npm:typescript@7.1.0-beta
+node tsgo-jsdoc-param-run-classic.mjs ./tsgo-jsdoc-param-repro.ts > classic.txt
+node tsgo-jsdoc-param-run-ts71.mjs . > ts71.txt      # needs a tsconfig.json here that includes tsgo-jsdoc-param-repro.ts
+diff classic.txt ts71.txt
+```
 
 ## Where this bites in practice
 
 We are experimenting with running jsii (the AWS CDK's multi-language binding
-generator) on the typescript-go API. jsii derives `.jsii` assembly parameter
+generator) on the TypeScript 7 programmatic API. jsii derives `.jsii` assembly parameter
 documentation from these APIs, and this divergence produced hundreds of
 member-level differences against the TypeScript-5-based output on aws-cdk-lib
 (both directions: docs appearing on overridden methods that should have none,
@@ -105,9 +118,11 @@ and constructor parameter docs missing). We currently work around it by reading
 
 ## Proposed fix
 
-See the follow-up PR: parameter `@param` lookup restricted to the hosting
+A fix was prototyped against the typescript-go staging repo before it closed
+(`internal/ls/jsdoc.go`): parameter `@param` lookup restricted to the hosting
 declaration's own JSDoc (with the overload first-signature hop), a
 `findBaseOfDeclaration`-equivalent fallback for constructor parameters, and
-`Symbol.getJsDocTags` support for parameter symbols. All existing Go tests and
-the `@typescript/native-preview` npm suite pass unchanged, and the repro above
-becomes byte-identical between TS5 and typescript-go.
+`Symbol.getJsDocTags` support for parameter symbols. With it, all existing Go
+tests and the API npm suite passed unchanged and the repro above became
+byte-identical between the classic compiler and the Go implementation. Happy to
+re-submit it against this repository.
