@@ -1,0 +1,359 @@
+From ba1f3eafe13ff4283c0c2b72d72b6ea37bd6940a Mon Sep 17 00:00:00 2001
+From: WinterYukky <49480575+WinterYukky@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 10:19:22 +0900
+Subject: [PATCH 1/2] LS/API: align parameter JSDoc resolution with the classic
+ services semantics
+
+Parameter documentation returned through the programmatic API
+(Symbol.getDocumentationComment / Symbol.getJsDocTags) diverged from the
+classic TypeScript services in three ways:
+
+1. A method parameter inherited @param documentation from a base-class
+   signature when the overriding method had no JSDoc of its own. The
+   classic implementation only consults the hosting declaration's own JSDoc
+   (getJSDocParameterTags), so overrides never inherit parameter docs.
+2. A constructor parameter without its own @param did not fall back to the
+   documentation of a same-named property on the class's super types
+   (findBaseOfDeclaration), so e.g. a parameter property documented on the
+   base class produced an empty comment.
+3. Symbol.getJsDocTags returned no tags for parameter symbols at all.
+
+getJSDocOrTag now resolves parameters through the hosting declaration's own
+JSDoc (with the overload first-signature hop), falls back to the base
+property only for constructor parameters, and GetSymbolJSDocTags applies
+the same rules so tags and comments agree. The API handler passes the
+checker through to GetSymbolJSDocTags for the base-property lookup.
+---
+ tsc/internal/api/session.go |  2 +-
+ tsc/internal/ls/jsdoc.go    | 98 ++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 97 insertions(+), 3 deletions(-)
+
+diff --git a/tsc/internal/api/session.go b/tsc/internal/api/session.go
+index 93d6ab53c..176e2bc6b 100644
+--- a/tsc/internal/api/session.go
++++ b/tsc/internal/api/session.go
+@@ -4917,7 +4917,7 @@ func (s *Session) handleGetJSDocTags(ctx context.Context, params *CheckerSymbolP
+ 		return nil, nil
+ 	}
+ 
+-	tags := ls.GetSymbolJSDocTags(symbol)
++	tags := ls.GetSymbolJSDocTags(setup.checker, symbol)
+ 	if len(tags) == 0 {
+ 		return nil, nil
+ 	}
+diff --git a/tsc/internal/ls/jsdoc.go b/tsc/internal/ls/jsdoc.go
+index c3ac3eb1c..f338b7cc9 100644
+--- a/tsc/internal/ls/jsdoc.go
++++ b/tsc/internal/ls/jsdoc.go
+@@ -48,7 +48,7 @@ func GetSymbolDocumentationComment(c *checker.Checker, symbol *ast.Symbol) strin
+ // GetSymbolJSDocTags collects a symbol's JSDoc tags. It backs the API's Symbol.getJsDocTags
+ // and mirrors Strada's getJsDocTagsFromDeclarations, except each tag's text is rendered as a
+ // plain string rather than SymbolDisplayPart[]. Tags with no text have an empty Text field.
+-func GetSymbolJSDocTags(symbol *ast.Symbol) []JSDocTagInfo {
++func GetSymbolJSDocTags(c *checker.Checker, symbol *ast.Symbol) []JSDocTagInfo {
+ 	if symbol == nil {
+ 		return nil
+ 	}
+@@ -61,6 +61,18 @@ func GetSymbolJSDocTags(symbol *ast.Symbol) []JSDocTagInfo {
+ 		if !seen.AddIfAbsent(decl) {
+ 			continue
+ 		}
++		if ast.IsParameterDeclaration(decl) && decl.Name() != nil && ast.IsIdentifier(decl.Name()) {
++			// Strada: a parameter symbol's tags are its matching `@param` tag(s)
++			// from the hosting declaration's OWN JSDoc (getJSDocParameterTags);
++			// when there is none, a CONSTRUCTOR parameter inherits the tags of a
++			// same-named property on the class's super types (findBaseOfDeclaration).
++			if tag := findOwnParameterTag(decl.Parent, decl.Name().Text()); tag != nil {
++				infos = append(infos, JSDocTagInfo{Name: tag.TagName().Text(), Text: getJSDocTagText(tag)})
++			} else if prop := findConstructorParamBaseProperty(c, decl, decl.Name().Text(), &collections.Set[*ast.Symbol]{}); prop != nil {
++				infos = append(infos, GetSymbolJSDocTags(c, prop)...)
++			}
++			continue
++		}
+ 		tags := declarationJSDocTags(decl)
+ 		// Skip comments containing @typedef/@callback since they're not associated with a
+ 		// particular declaration, unless they also carry @param/@return (treated as local docs).
+@@ -179,7 +191,21 @@ func getJSDocOrTag(c *checker.Checker, node *ast.Node, seenSymbols *collections.
+ 			// For binding patterns, match JSDoc @param tags by position rather than by name
+ 			return getJSDocParameterTagByPosition(c, node)
+ 		}
+-		return getMatchingJSDocTag(c, node.Parent, name.Text(), isMatchingParameterTag, seenSymbols)
++		// Strada semantics for parameter documentation (services.ts):
++		//   - `@param` is only taken from the hosting declaration's OWN JSDoc
++		//     (getJSDocParameterTags) — parameters of an overriding method never
++		//     inherit `@param` docs from base signatures, even when the override
++		//     has no JSDoc at all;
++		//   - a CONSTRUCTOR parameter without its own `@param` inherits the
++		//     documentation of a same-named property on the class's super types
++		//     (findBaseOfDeclaration), recursing through undocumented overrides.
++		if tag := findOwnParameterTag(node.Parent, name.Text()); tag != nil {
++			return tag
++		}
++		if prop := findConstructorParamBaseProperty(c, node, name.Text(), seenSymbols); prop != nil && prop.ValueDeclaration() != nil {
++			return getJSDocOrTag(c, prop.ValueDeclaration(), seenSymbols)
++		}
++		return nil
+ 	case ast.IsTypeParameterDeclaration(node):
+ 		return getMatchingJSDocTag(c, node.Parent, node.Name().Text(), isMatchingTemplateTag, seenSymbols)
+ 	case ast.IsVariableDeclaration(node) && ast.IsVariableDeclarationList(node.Parent) && core.FirstOrNil(node.Parent.AsVariableDeclarationList().Declarations.Nodes) == node:
+@@ -236,6 +262,74 @@ func getJSDocOrTag(c *checker.Checker, node *ast.Node, seenSymbols *collections.
+ 	return nil
+ }
+ 
++// ownJSDocOf returns the hosting declaration's own JSDoc: the last JSDoc along
++// the comment location chain of the declaration itself or, for an overload
++// implementation, of the symbol's first function-like declaration. Unlike
++// getJSDocOrTag it never falls back to base-class members.
++func ownJSDocOf(host *ast.Node) *ast.Node {
++	if host == nil {
++		return nil
++	}
++	for current := host; current != nil; current = ast.GetNextJSDocCommentLocation(current) {
++		if jsdoc := getJSDoc(current); jsdoc != nil {
++			return jsdoc
++		}
++	}
++	if symbol := host.Symbol(); symbol != nil &&
++		(ast.IsFunctionDeclaration(host) || ast.IsMethodDeclaration(host) || ast.IsMethodSignatureDeclaration(host) || ast.IsConstructorDeclaration(host) || ast.IsConstructSignatureDeclaration(host)) {
++		firstSignature := core.Find(symbol.Declarations(), ast.IsFunctionLike)
++		if firstSignature != nil && firstSignature != host {
++			for current := firstSignature; current != nil; current = ast.GetNextJSDocCommentLocation(current) {
++				if jsdoc := getJSDoc(current); jsdoc != nil {
++					return jsdoc
++				}
++			}
++		}
++	}
++	return nil
++}
++
++// findOwnParameterTag finds the `@param` tag matching `name` in the hosting
++// declaration's own JSDoc (Strada's getJSDocParameterTags).
++func findOwnParameterTag(host *ast.Node, name string) *ast.Node {
++	if jsdoc := ownJSDocOf(host); jsdoc != nil && jsdoc.Kind == ast.KindJSDoc {
++		if tags := jsdoc.AsJSDoc().Tags; tags != nil {
++			for _, tag := range tags.Nodes {
++				if isMatchingParameterTag(tag, name) {
++					return tag
++				}
++			}
++		}
++	}
++	return nil
++}
++
++// findConstructorParamBaseProperty implements Strada's findBaseOfDeclaration for
++// constructor parameters: the first super type (extends and implements clauses,
++// in source order) that has a property named like the parameter contributes that
++// property — even when its documentation turns out to be empty, the search stops
++// there. Returns nil for non-constructor hosts (method parameters never inherit).
++func findConstructorParamBaseProperty(c *checker.Checker, param *ast.Node, name string, seenSymbols *collections.Set[*ast.Symbol]) *ast.Symbol {
++	host := param.Parent
++	if host == nil || !ast.IsConstructorDeclaration(host) || host.Parent == nil || !ast.IsClassLike(host.Parent) {
++		return nil
++	}
++	superTypeNodes := append(
++		append([]*ast.Node{}, ast.GetHeritageElements(host.Parent, ast.KindExtendsKeyword)...),
++		ast.GetHeritageElements(host.Parent, ast.KindImplementsKeyword)...,
++	)
++	for _, superTypeNode := range superTypeNodes {
++		baseType := c.GetTypeAtLocation(superTypeNode)
++		if baseType == nil {
++			continue
++		}
++		if prop := c.GetPropertyOfType(baseType, name); prop != nil && seenSymbols.AddIfAbsent(prop) {
++			return prop
++		}
++	}
++	return nil
++}
++
+ func getMatchingJSDocTag(c *checker.Checker, node *ast.Node, name string, match func(*ast.Node, string) bool, seenSymbols *collections.Set[*ast.Symbol]) *ast.Node {
+ 	if jsdoc := getJSDocOrTag(c, node, seenSymbols); jsdoc != nil && jsdoc.Kind == ast.KindJSDoc {
+ 		if tags := jsdoc.AsJSDoc().Tags; tags != nil {
+-- 
+2.43.0
+
+
+From d5859582896c959d0e4e02204ad2ac0ee9aeea83 Mon Sep 17 00:00:00 2001
+From: WinterYukky <49480575+WinterYukky@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 10:19:23 +0900
+Subject: [PATCH 2/2] LS: add test for classic-aligned parameter JSDoc
+ resolution
+
+Covers the three behaviours: own @param on base and constructor
+declarations (comment and tag), no inheritance for method parameters of
+overrides with or without their own JSDoc, and the base-property fallback
+for constructor parameters.
+---
+ tsc/internal/ls/jsdoc_test.go | 158 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 158 insertions(+)
+ create mode 100644 tsc/internal/ls/jsdoc_test.go
+
+diff --git a/tsc/internal/ls/jsdoc_test.go b/tsc/internal/ls/jsdoc_test.go
+new file mode 100644
+index 000000000..8c7d156be
+--- /dev/null
++++ b/tsc/internal/ls/jsdoc_test.go
+@@ -0,0 +1,158 @@
++package ls_test
++
++import (
++	"testing"
++
++	"github.com/microsoft/TypeScript/tsc/internal/ast"
++	"github.com/microsoft/TypeScript/tsc/internal/bundled"
++	"github.com/microsoft/TypeScript/tsc/internal/compiler"
++	"github.com/microsoft/TypeScript/tsc/internal/core"
++	"github.com/microsoft/TypeScript/tsc/internal/ls"
++	"github.com/microsoft/TypeScript/tsc/internal/tsoptions"
++	"github.com/microsoft/TypeScript/tsc/internal/tspath"
++	"github.com/microsoft/TypeScript/tsc/internal/vfs/vfstest"
++	"gotest.tools/v3/assert"
++)
++
++// TestParameterJSDocResolution verifies that parameter documentation follows
++// Strada's services semantics:
++//
++//   - `@param` is only taken from the hosting declaration's own JSDoc:
++//     parameters of an overriding method never inherit `@param` docs from base
++//     signatures, even when the override has no JSDoc at all;
++//   - a CONSTRUCTOR parameter without its own `@param` inherits the
++//     documentation of a same-named property on the class's super types
++//     (Strada's findBaseOfDeclaration), recursing through undocumented
++//     overrides;
++//   - Symbol.getJsDocTags for a parameter returns its matching `@param` tag.
++func TestParameterJSDocResolution(t *testing.T) {
++	t.Parallel()
++	if !bundled.Embedded {
++		t.Skip("bundled files are not embedded")
++	}
++
++	content := `/** A greeter contract with documented method parameters. */
++export abstract class MatcherBase {
++  /**
++   * Tests the value.
++   * @param actual the target to match
++   */
++  public abstract test(actual: string): void;
++}
++
++/** Overrides test WITH its own JSDoc (summary only, no @param). */
++export class CaptureLike extends MatcherBase {
++  /** Captures the value. */
++  public test(actual: string): void {
++    void actual;
++  }
++}
++
++/** Overrides test with NO JSDoc at all. */
++export class PlainCapture extends MatcherBase {
++  public test(actual: string): void {
++    void actual;
++  }
++}
++
++/** Constructor JSDoc with @param tags. */
++export class Tagged {
++  /**
++   * Creates a tag.
++   * @param key The string key for the tag.
++   */
++  constructor(key: string) {
++    void key;
++  }
++}
++
++/** Base class with a documented property. */
++export class WithCount {
++  /** How many widgets there are. */
++  public readonly count: number = 0;
++}
++
++/** Subclass ctor without JSDoc: the param doc comes from base property count. */
++export class Counted extends WithCount {
++  constructor(count: number) {
++    super();
++    void count;
++  }
++}`
++
++	fs := vfstest.FromMap(map[string]string{
++		"/main.ts": content,
++		"/tsconfig.json": `
++				{
++					"compilerOptions": { "strict": true },
++					"files": ["main.ts"]
++				}
++			`,
++	}, tspath.CaseInsensitive /*caseSensitivity*/)
++	fs = bundled.WrapFS(fs)
++
++	host := compiler.NewCompilerHost(fs, bundled.LibPath(), nil, nil, nil)
++	parsed, errors := tsoptions.GetParsedCommandLineOfConfigFile("/tsconfig.json", &core.CompilerOptions{}, nil, fs, nil)
++	assert.Equal(t, len(errors), 0, "Expected no errors in parsed command line")
++	p := compiler.NewProgram(compiler.ProgramOptions{
++		Config: parsed,
++		Host:   host,
++	})
++	p.BindSourceFiles()
++	c, done := p.GetTypeChecker(t.Context())
++	defer done()
++	file := p.GetSourceFile("/main.ts")
++
++	firstParamOfMember := func(className string, memberName string) *ast.Symbol {
++		for _, stmt := range file.Statements.Nodes {
++			if !ast.IsClassDeclaration(stmt) || stmt.Name().Text() != className {
++				continue
++			}
++			for _, member := range stmt.Members() {
++				isCtor := ast.IsConstructorDeclaration(member)
++				if (memberName == "constructor") != isCtor {
++					continue
++				}
++				if !isCtor && (member.Name() == nil || member.Name().Text() != memberName) {
++					continue
++				}
++				param := member.Parameters()[0]
++				return param.Symbol()
++			}
++		}
++		t.Fatalf("member %s.%s not found", className, memberName)
++		return nil
++	}
++
++	docOf := func(className string, memberName string) string {
++		return ls.GetSymbolDocumentationComment(c, firstParamOfMember(className, memberName))
++	}
++	tagsOf := func(className string, memberName string) []ls.JSDocTagInfo {
++		return ls.GetSymbolJSDocTags(c, firstParamOfMember(className, memberName))
++	}
++
++	// Base declaration: @param from its own JSDoc, and getJsDocTags returns it.
++	assert.Equal(t, docOf("MatcherBase", "test"), "the target to match")
++	baseTags := tagsOf("MatcherBase", "test")
++	assert.Equal(t, len(baseTags), 1)
++	assert.Equal(t, baseTags[0].Name, "param")
++	assert.Equal(t, baseTags[0].Text, "actual the target to match")
++
++	// Method parameters never inherit @param from base signatures, whether the
++	// override has its own (param-less) JSDoc or no JSDoc at all.
++	assert.Equal(t, docOf("CaptureLike", "test"), "")
++	assert.Equal(t, len(tagsOf("CaptureLike", "test")), 0)
++	assert.Equal(t, docOf("PlainCapture", "test"), "")
++	assert.Equal(t, len(tagsOf("PlainCapture", "test")), 0)
++
++	// Constructor @param from own JSDoc.
++	assert.Equal(t, docOf("Tagged", "constructor"), "The string key for the tag.")
++	taggedTags := tagsOf("Tagged", "constructor")
++	assert.Equal(t, len(taggedTags), 1)
++	assert.Equal(t, taggedTags[0].Text, "key The string key for the tag.")
++
++	// Constructor parameter with no own @param: documentation comes from the
++	// same-named property on the base class (findBaseOfDeclaration).
++	assert.Equal(t, docOf("Counted", "constructor"), "How many widgets there are.")
++	assert.Equal(t, len(tagsOf("Counted", "constructor")), 0)
++}
+-- 
+2.43.0
+

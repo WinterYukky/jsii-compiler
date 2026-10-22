@@ -20,3 +20,7 @@ out slower than per-symbol requests on `typescript@7.1.0-beta`.
 Build the patched toolchain from a `v7.1-beta` checkout with
 `npx hereby build && npx hereby build:api` and point jsii at the result with
 `JSII_TS7_TYPESCRIPT=<path to built npm package dir>`.
+
+## Parameter JSDoc resolution fix (TypeScript 7.1)
+
+- `typescript-7.1-jsdoc-param-fix.patch` — two `git am`-able commits (fix + test) on top of the `v7.1-beta` tag of microsoft/TypeScript, porting the classic `getJSDocParameterTags` / `findBaseOfDeclaration` semantics to `internal/ls/jsdoc.go`. Also pushed as `fix/jsdoc-param-resolution` on WinterYukky/TypeScript. Issue and PR drafts: `../tsgo-jsdoc-param-issue.md`, `../tsgo-jsdoc-param-pr-body.md`.
