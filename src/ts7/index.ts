@@ -85,6 +85,7 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
 
   // SPIKE: JSII_TS7_ASYNC=1 runs the pipelined (typescript/async) assembler.
   const useAsync = !!process.env.JSII_TS7_ASYNC;
+  await (globalThis as any).__legePerfReady; // measurement preload hook, if any (undefined otherwise)
   const host = useAsync ? await Ts7Host.openAsync(projectRoot) : await Ts7Host.open(projectRoot);
   try {
     const project = host.getProject();

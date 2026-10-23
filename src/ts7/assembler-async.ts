@@ -165,24 +165,32 @@ export class Ts7AsyncAssembler {
     const moduleSymbol = await this.checker.getSymbolAtLocation(entrySf);
     const moduleExports = await this.checker.getExportsOfModule(moduleSymbol);
 
+    (globalThis as any).__legePerfMark?.('register-start');
     await this._registerModuleExports(moduleExports);
+    (globalThis as any).__legePerfMark?.('register-done');
 
     // SPIKE: fan-out. Every registered type is visited anyway (no laziness is
     // crossed), so visit them `width` at a time; the async client pipelines the
     // requests of all in-flight visits into batched round-trips. Results are
     // committed in registration order so the output is independent of timing.
+    // Sliding window (not chunked Promise.all): a chunk drains to a single
+    // slow type whose remaining steps then travel as one-request batches; with a
+    // window the in-flight count stays at `width` until the very end.
     const width = Math.max(1, Number(process.env.JSII_TS7_ASYNC_WIDTH ?? 256));
     const visited: spec.Type[] = new Array(this.exported.length);
-    for (let i = 0; i < this.exported.length; i += width) {
-      const chunk = this.exported.slice(i, i + width);
-      const results = await Promise.all(chunk.map(({ name, sym, decl, fqn }) => this._visitNode(name, sym, decl, fqn)));
-      for (let j = 0; j < results.length; j++) {
-        visited[i + j] = results[j];
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < this.exported.length) {
+        const i = next++;
+        const { name, sym, decl, fqn } = this.exported[i];
+        visited[i] = await this._visitNode(name, sym, decl, fqn);
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(width, this.exported.length) }, worker));
     for (let i = 0; i < this.exported.length; i++) {
       this.types[this.exported[i].fqn] = visited[i];
     }
+    (globalThis as any).__legePerfMark?.('visit-done');
 
     this._propagateDatatype();
 
@@ -333,6 +341,23 @@ export class Ts7AsyncAssembler {
     return s ? this._resolveAlias(s) : undefined;
   }
 
+  /**
+   * Run `fn` over `items` with at most `width` in flight (sliding window), preserving
+   * result order. Requests issued by concurrent `fn`s share batched round-trips.
+   */
+  private async _fanOut<T, R>(items: readonly T[], fn: (item: T) => Promise<R>, width = 256): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < items.length) {
+        const i = next++;
+        results[i] = await fn(items[i]);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(width, items.length) }, worker));
+    return results;
+  }
+
   /** `type.getSymbol()` tolerant of a missing type (one RPC when not yet materialized). */
   private async _symbolOfType(type: any): Promise<any> {
     return type ? type.getSymbol?.() : undefined;
@@ -389,8 +414,12 @@ export class Ts7AsyncAssembler {
     const visitedModules = new Set<string>();
 
     const collect = async (mExports: any[], prefix: string, moduleDir: string): Promise<void> => {
-      for (const e of mExports) {
-        const sym = await this._resolveAlias(e);
+      // SPIKE: resolve every export's alias concurrently (one batched round-trip
+      // per alias depth) before the order-preserving sequential walk below.
+      const resolved = await this._fanOut(mExports, (e) => this._resolveAlias(e));
+      for (let ei = 0; ei < mExports.length; ei++) {
+        const e = mExports[ei];
+        const sym = resolved[ei];
         const declH = sym.declarations?.[0];
         if (!declH) {
           continue;
@@ -488,7 +517,23 @@ export class Ts7AsyncAssembler {
     }
     // Batch-prefetch docs for all candidate type symbols (used by the
     // isInternal/shouldStrip checks inside _registerType).
-    this._prefetchDocs(registrations.map((r) => r.sym));
+    // SPIKE: _registerType needs, per registration, the symbol's JSDoc tags
+    // (isInternal / shouldStrip), its first declaration and its nested exports —
+    // three dependent round-trips that were issued one type at a time. Every
+    // registration is checked anyway, so fetch the tags for all of them
+    // concurrently, then (only for the survivors, exactly the set the sequential
+    // pass would resolve) the declaration + nested exports. The registration
+    // itself stays sequential so `exported` keeps its canonical-first order.
+    await this._fanOut(registrations, (r) => this._jsDocTags(r.sym));
+    const survivors: typeof registrations = [];
+    for (const r of registrations) {
+      if (!(await this._isInternal(r.sym)) && !(await this._shouldStrip(r.sym, r.fqn))) {
+        survivors.push(r);
+      }
+    }
+    await this._fanOut(survivors, (r) =>
+      Promise.all([r.sym.declarations?.[0]?.resolve(this.project), r.sym.getExports?.()]),
+    );
     for (const r of registrations) {
       await this._registerType(r.sym, r.name, r.fqn);
     }
