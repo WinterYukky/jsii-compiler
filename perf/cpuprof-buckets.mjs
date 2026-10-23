@@ -24,6 +24,8 @@ function bucketOf(cf) {
     return 'client:utf8 encode/decode';
   if (fn === 'parse' && url === '') return 'client:JSON.parse';
   if (fn === 'stringify' && url === '') return 'client:JSON.stringify';
+  if (url.includes('vscode-jsonrpc')) return 'client:vscode-jsonrpc (async framing/JSON)';
+  if (url.includes('/dist/api/async/')) return 'client:async api.js (handles/materialize)';
   if (url.includes('/dist/api/syncChannel')) return 'client:syncChannel (framing/msgpack)';
   if (url.includes('/dist/api/node/')) return 'client:node.js (AST decode/RemoteNode)';
   if (url.includes('/dist/api/sync/api')) return 'client:sync/api.js (handles/materialize)';
