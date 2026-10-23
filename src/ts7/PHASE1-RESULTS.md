@@ -551,3 +551,221 @@ scripts/ts7-setup.sh
 # build jsii-compiler, then in a jsii package:
 JSII_COMPILER_BACKEND=ts7 JSII_TS7_DIR=/path/to/jsii-compiler/.ts7 jsii
 ```
+
+## Phase 3A — where the wall-clock goes on the official TypeScript 7.1 API (`typescript/sync`)
+
+Goal: a complete, measured decomposition of the ts7 backend's wall-clock on the
+**official** `typescript@7.1.0-beta` programmatic API (PR branch `feat/ts7-backend`
+@ 786df41, no fork), so optimizations can be ranked by expected seconds rather than
+by request counts.
+
+**Setup.** c7i.4xlarge (16 vCPU Xeon 8488C, 30 GB), Ubuntu 24.04, Node 22.23, Go 1.27
+(pprof reading only), `typescript@7.1.0-beta` + `@typescript/typescript-linux-x64`.
+Input: the upstream benchmark fixture `fixtures/.tarballs/aws-cdk-lib.tgz` (the same
+source snapshot `yarn projen test:benchmark` uses; L1s pre-generated, `npm ci`),
+compiled with `--strip-deprecated --silence-warnings=reserved-word`, fresh copy of
+the fixture and dropped page cache before every run, 3 runs per configuration.
+This fixture is a slightly smaller snapshot than the real aws-cdk-lib used in the
+earlier 53.8s measurement (698k vs 792k requests), so **absolute numbers below are
+not comparable to earlier sections; only the classic-vs-ts7 ratio and the internal
+breakdown are**. Measurement tooling lives in `perf/` on this research branch
+(`rpc-hook.cjs` preload, `cpuprof-buckets.mjs`, `echo-bench.mjs`, `async-bench.mjs`,
+`ts7-index-phase-marks.patch`); the PR branch is untouched. Raw logs, `rpc.json`
+per run, V8 `.cpuprofile`s and Go `pprof` files are archived off-repo
+(`perf/raw/ts7-perf-raw-20261023.tar.gz` in the team bucket).
+
+Note on the classic baseline: on this fixture the classic backend exits 1 with
+7×JSII3000 + 7×JSII3999 (`--strip-deprecated` erasing deprecated types that are
+still referenced). It still performs the full type-check, assembler walk and
+`program.emit()`; only the final `.jsii` write is skipped (~1s). The comparison is
+therefore fair, if anything slightly favourable to classic.
+
+### Baselines (wall-clock, seconds)
+
+| configuration | run 1 | run 2 | run 3 | median |
+|---|---|---|---|---|
+| classic (`jsii` default backend) | 83.1 | 84.1 | 85.7 | **84.1** |
+| ts7 default | 47.8 | 48.7 | 49.0 | **48.7 (1.73x)** |
+| ts7 `JSII_TS7_SKIP_TYPECHECK=1` | 43.4 | 42.6 | — | 43.0 |
+| ts7 `JSII_TS7_BATCH=1` | 61.4 | 68.1 | 68.2 | 68.1 |
+| ts7 + memoized duplicate requests (3C below) | 50.4 | 50.2 | 48.9 | 50.2 |
+| ts7 `GOGC=400` (server runtime) | 50.1 | 47.6 | — | — |
+| ts7 `GOGC=off` / `GOMAXPROCS=4` / both | 49.6 / 50.9 / 47.7 | | | no effect |
+
+The measurement preload itself costs < 1s (47.5s without it).
+
+### The 48.7s, fully decomposed (ts7 default, phase marks + per-request hook)
+
+| phase | wall | RPCs | notes |
+|---|---|---|---|
+| jsii startup before the ts7 backend | 1.2–1.9s | 0 | project-info, yargs, module loading |
+| API spawn + `createSnapshot` | 0.9s | 2 | server 0.7s |
+| type-check (`collectTsDiagnostics`) | **5.8s** | 4 | all of it is one `getGlobalDiagnostics` RPC (server 5.8s; `getSemanticDiagnostics` is 0.02s). Go runs the check on multiple threads: 10.7s CPU in 5.8s wall |
+| **assembler walk** | **32–34s** | **698,290** | see below |
+| `writeAssembly` (sort-json + sha256 + write) | 1.2s | 0 | Node only |
+| `program.emit()` + rtti injection | 6.4–6.9s | 1 | server 5.6s, Node 0.8s |
+| dispose/close | <0.1s | 2 | |
+
+Where the **assembler walk's 33s** goes (V8 `--cpu-prof`, self time, default run):
+
+| bucket | time | share |
+|---|---|---|
+| `readSync` on the pipe = waiting for the server to answer | **25.4s** (36.6s over the whole run, of which 11.4s are the typecheck/emit RPCs) | 77% |
+| `writeSync` (request framing to the pipe) | 1.8s | 5% |
+| `ts7/assembler.ts` logic | 1.8s | 5% |
+| `client.js` (`apiRequest`: `JSON.stringify` params + `JSON.parse` result) | 1.5s | 5% |
+| GC | 0.9s | 3% |
+| AST decode / `RemoteNode` / handle materialization (`node.js`, `sync/api.js`) | 1.0s | 3% |
+| msgpack framing (`syncChannel.js`), utf8 decode | 0.5s | 1% |
+
+What the server does inside those 25.4s of waiting (Go `getServerTiming` totals, Go
+`pprof` of the whole run, and sampled per-method server time):
+
+- Total server processing time (inside `HandleRequest`, i.e. excluding JSON
+  marshalling of the response and pipe I/O) = **18.1s for the whole run**, of which
+  typecheck 5.8 + emit 5.6 + snapshot 0.7. **The assembler's 698k requests cost
+  the Go checker only ≈ 6s.** Go pprof agrees: `Session.HandleRequest` 6.2s cum.
+- Outside `HandleRequest`, per request: `MessagePackProtocol.readTuple` 1.8s +
+  `writeTuple` 1.9s (incl. `json.Marshal` of the response) + `json.Unmarshal` of
+  params 0.9s ≈ **4.6s of per-request framing on the Go side**.
+- Go GC: `gcBgMarkWorker` 12.8s CPU (27% of Go CPU) but it runs on otherwise idle
+  cores; `GOGC=400`/`GOGC=off` did not change the wall-clock (table above), so GC
+  is **not** on the critical path.
+- Go total CPU 47.6s over 45.5s wall = **the server is effectively single-threaded
+  during the walk**; 15 of 16 cores are idle.
+- `getCachedSourceFile`: 1,657 requests, **391 MB of the 618 MB received**, 1.85s
+  RPC (Go `encoder.EncodeSourceFile` 1.2s). Callers: `NodeHandle.resolve()` from
+  `_registerType` (1,354) and `_registerModuleExports` (285) — the first touch of
+  each declaration's file materializes the whole file's AST on the client. This is
+  the client's object model (whole-file binary AST), not avoidable from jsii; it
+  costs ≈ 2s.
+
+**The remaining ≈ 15s of the walk is pure synchronous round-trip latency.** The
+echo microbenchmark (`perf/echo-bench.mjs`, same box) puts the floor of one
+sync round trip at **15–17 µs for a 0–100 B payload** (9.9 µs for binary), with a
+payload slope of ≈ 1.2 ms/MB (so the average 885 B response costs ≈ 1 µs of bytes).
+698k × 16 µs ≈ **11s** is the irreducible cost of the current one-request-at-a-time
+design at this request count, independent of payload size.
+
+Per-method top 10 (default run; `rpc` = wall inside `requestBytesSync`, `srv` =
+sampled server processing time extrapolated):
+
+| method | calls | rpc | avg | srv (est.) | recv | notes |
+|---|---|---|---|---|---|---|
+| getGlobalDiagnostics | 1 | 5.84s | — | 5.8s | 2 B | the typecheck |
+| emit | 1 | 5.6–6.1s | — | 5.6s | 0.3 MB | writeToDisk emit |
+| getJsDocTags | 133,686 | 3.85s | 29 µs | 0.59s | 12 MB | server avg 4.4 µs |
+| getTypeAtLocation | 125,317 | 3.27s | 26 µs | 0.31s | 20 MB | |
+| getTypeOfSymbolAtLocation | 105,012 | 3.08s | 29 µs | 0.61s | 13 MB | |
+| getDocumentationComment | 116,694 | 3.00s | 26 µs | 0.44s | 12 MB | |
+| getCachedSourceFile | 1,657 | 1.85s | 1.1 ms | 0.95s | **391 MB** | whole-file AST |
+| getAliasedSymbol | 7,301 | 1.49s | 204 µs | 0.44s | 4 MB | |
+| getPropertiesOfType | 22,720 | 1.49s | 65 µs | 0.57s | 105 MB | |
+| getExportsOfModule | 614 | 1.40s | 2.3 ms | 2.2s* | 8 MB | *first-touch module resolution |
+| getTypeFromTypeNode | 47,147 | 1.13s | 24 µs | 0.09s | 6 MB | |
+
+### 3B — the `JSII_TS7_BATCH=1` regression, dissected (hypothesis "big responses are slow to decode on the Node side": **rejected**)
+
+Default vs batch, same box, V8 cpu-prof and per-method hook on both:
+
+- Node-side **non-waiting** CPU is unchanged: 13.5s (default) vs 15.3s (batch);
+  GC 0.9s vs 0.8s; `JSON.parse`/utf8 decode of the 33 MB of batch responses is
+  ≈ 0.5s. The entire +14s is **more time waiting in `readSync`** (36.6s → 49.3s).
+- The batch requests themselves are cheap (19,876 × 118 µs = 2.4s). What gets
+  slow is **every other request**: getTypeAtLocation 26 → 60 µs, getTypeOfSymbolAtLocation
+  29 → 75 µs, getTypeFromTypeNode 24 → 72 µs, getFullyQualifiedName 30 → 53 µs —
+  a uniform ≈ 2x latency inflation on ~460k requests ≈ +13s.
+- Go CPU inside `HandleRequest` rose only 6.2 → 7.8s (`json.Unmarshal` of the
+  87 MB of batch params +0.8s, `handleBatchRequests` 1.2s); `getServerTiming`
+  totals 18.1 → 20.2s. So ≈ 2s of the +14s is server compute; **≈ 11s is added
+  latency per round trip that shows up as CPU on neither side.**
+- Go GC is not it: `GOGC=400` with batch gave 70.9s (worse), and GOGC does nothing
+  in default mode either.
+
+Open question (not resolved in this phase, hypothesis only): something about
+handling large messages on the Go side makes subsequent small round trips wake up
+~30 µs slower (scheduler/`sysmon` hand-off after long blocking pipe writes, or
+pipe-buffer effects). A `GODEBUG=schedtrace`/`perf sched` run on the server is the
+next step if batching is to be rescued. Until then: **on 7.1, batching is a net
+loss for this workload** and the default (no batch) is correct.
+
+### 3C — input-keyed cache: real duplicates, small win (parity byte-identical)
+
+Distinct request parameters per method (`JSII_PERF_DEDUP=1`):
+
+| method | calls | distinct inputs | duplicates |
+|---|---|---|---|
+| getTypeAtLocation | 125,317 | 25,340 | **99,977 (80%)** |
+| getTypeArguments | 9,602 | 2,338 | 7,264 (76%) |
+| getPropertyOfType | 3,043 | 1,388 | 1,655 (54%) |
+| getAliasedSymbol | 7,301 | 5,364 | 1,937 (27%) |
+| getSymbolAtLocation | 11,249 | 8,963 | 2,286 (20%) |
+| getJsDocTags / getDocumentationComment / getPropertiesOfType / getExportsOfSymbol / getTypeFromTypeNode | — | — | **0%** (the existing `(path:index)` doc cache works; the rest are already unique) |
+
+Memoizing the raw response of those five methods by `(method, params)` in the
+preload (valid: a snapshot's program is immutable) removed **113,119 requests
+(−16%, 698k → 585k)** with a **byte-identical `.jsii`** — and moved wall-clock by
+nothing measurable (50.2s median vs 48.7s; run-to-run spread is ±1.5s). Total
+server processing time was unchanged (18.6s vs 18.1s): the duplicated answers were
+already cached in the Go checker (server avg 2.5 µs for getTypeAtLocation), so the
+only saving is the round-trip floor, ≈ 113k × 16 µs ≈ 1.8s — real, but inside the
+noise of a single 3-run series. Consistent with Phase 2C (−98k requests → −2.2s).
+
+### 3D — async API (`typescript/async`) pipelining, microbenchmark
+
+`perf/async-bench.mjs`: 2,713 exported symbols from 220 fixture files, 5 dependent
+checker calls per symbol (getTypeOfSymbol → getFullyQualifiedName → getJsDocTags →
+getDocumentationComment → getPropertiesOfType), fresh server process per
+configuration (no warm checker):
+
+| client | in-flight symbols | wire requests | throughput |
+|---|---|---|---|
+| sync (`typescript/sync`) | 1 | 11,957 | **6,276 symbols/s** (36 µs/req) |
+| async, sequential (`await` each) | 1 | 11,957 | 425 symbols/s (**15x slower** than sync: vscode-jsonrpc + event loop per request) |
+| async, `Promise.all` chunks of 16 | 16 | 827 | 3,700 symbols/s |
+| async, chunks of 64 | 64 | 211 | 7,923 symbols/s |
+| async, chunks of 256 | 256 | 55 | **10,200 symbols/s (1.6x sync)** |
+| async, chunks of 1024 | 1024 | 15 | 10,049 symbols/s |
+
+The async client coalesces every request issued in the same macrotask into one
+`batchRequests` message (so the per-request round trip is amortized), but the
+server handles a batch sequentially in one goroutine — there is **no server-side
+parallelism**, which is why it saturates at ≈ 1.6x. Interestingly these async
+batches did **not** show the 3B latency inflation (nothing else was in flight to
+be inflated), which is consistent with 3B being an interaction effect rather than
+batch cost per se.
+
+### Conclusions (measured → inferred)
+
+1. **The Go checker is not the bottleneck** (≈ 6s of 33s walk) and neither is
+   payload decoding on the Node side (≈ 2.5s). **≈ 60% of the walk is the
+   per-request tax of a synchronous one-at-a-time RPC design**: ≈ 16 µs
+   wake-up/syscall floor + ≈ 7 µs Go framing/JSON + ≈ 7 µs Node client overhead,
+   × 698k requests ≈ 21s. This is inferred from the echo floor and the Go/Node
+   profiles; the three components are each measured, their sum matches the walk
+   within ≈ 2s.
+2. The **floor** of this backend on this fixture, if the per-request tax went to
+   zero, is ≈ 48.7 − 21 ≈ **27s** (typecheck 5.8 + emit 6.5 + Go walk compute 6 +
+   source-file transfer 2 + Node assembler/write 4 + startup 2.5). That would be
+   ≈ 3.1x over classic; the earlier "3.7x" (fork, no typecheck) is **not reachable
+   on the official API by request-shaving alone** — the typecheck (5.8s) and emit
+   (6.5s) are now first-class costs that the fork-era numbers excluded.
+3. Request **count** reduction only pays when it does not cross a laziness
+   boundary (2E) and does not trigger the 3B latency effect; both of jsii's
+   cheap options (input-keyed cache; doc batching) are now measured at ≤ 2s and
+   −14s respectively.
+
+### Candidate optimizations, ranked by expected seconds on this fixture
+
+| # | candidate | expected | cost | where | status |
+|---|---|---|---|---|---|
+| 1 | **Async client with wide fan-out (≥ 256 types in flight) for the assembler walk** — restructure `assemble()` so independent type visits (`_visitNode` per registered type; member visits inside a type) run as concurrent promise chains over `typescript/async`, after the registration pass | walk 33s → ≈ 20s (1.6x on the walk, from 3D), **≈ −13s** (48.7 → ≈ 36s, ≈ 2.3x) | **high**: every accessor in the 1,850-line assembler becomes `await`-able; must respect the 2E laziness lesson (do not prefetch what the visit would skip) | jsii only (API exists) | microbenchmark only; a chunked-async spike on `_visitMembers` for one submodule is the next experiment |
+| 2 | **Server-side concurrency for batched requests** (goroutine-per-item inside `batchRequests`, or the async conn not coalescing) — the server has 15 idle cores during the walk | if the checker tolerates it: walk could approach the ≈ 6s Go compute + transfer, **−15…−20s** (toward ≈ 28s, ≈ 3x); if not, nothing | medium–high, **TypeScript side** (checker thread-safety is the question) | typescript-go | hypothesis; needs a Go-side experiment |
+| 3 | **Fix the 3B latency inflation** (large messages making subsequent small round trips ≈ 2x slower) | unlocks E1-style doc batching: −218k requests ≈ **−3…−5s** instead of +14s; also a precondition for #1's larger batches to stay cheap | medium, **TypeScript side** (Go scheduler/pipe investigation) | typescript-go | open question with repro |
+| 4 | **Input-keyed cache for getTypeAtLocation/getTypeArguments/getPropertyOfType/getAliasedSymbol/getSymbolAtLocation** (in jsii, or in the client's `Checker` as in 2C) | −113k requests, **≈ −1.8s** (in noise for one series) | low (a `Map` per method, keyed by handle ids; parity byte-identical here) | jsii or typescript client | measured |
+| 5 | Lighter `getCachedSourceFile` (lazy/partial AST, or not materializing files whose declarations are only name-checked) | ≈ −1…−2s (391 MB, 1.85s) | medium, TypeScript side | typescript-go | sized, not tried |
+| 6 | Skip `getGlobalDiagnostics` when the caller already ran `tsc` (e.g. `jsii --no-typecheck` opt-in, mirroring `JSII_TS7_SKIP_TYPECHECK`) | **−5.8s**, but changes semantics (type errors no longer fail the build) | trivial | jsii | measured; policy question, not an optimization |
+
+Not worth pursuing (measured): `GOGC`/`GOMAXPROCS` tuning (no effect); shrinking
+response payloads (bytes cost ≈ 1 µs per request at the observed sizes); Node-side
+JSON/decoding work (≈ 2.5s total).
