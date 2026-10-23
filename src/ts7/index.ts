@@ -24,6 +24,7 @@ import * as ts from 'typescript';
 import * as literate from '../literate';
 import type { ProjectInfo } from '../project-info';
 import { Ts7Assembler } from './assembler';
+import { Ts7AsyncAssembler } from './assembler-async';
 import { runTs7EmitPipeline } from './ts7-emit';
 import { Ts7Host } from './ts7-host';
 
@@ -82,7 +83,9 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
   const pkg = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
   const entry = deriveEntry(projectRoot, pkg);
 
-  const host = await Ts7Host.open(projectRoot);
+  // SPIKE: JSII_TS7_ASYNC=1 runs the pipelined (typescript/async) assembler.
+  const useAsync = !!process.env.JSII_TS7_ASYNC;
+  const host = useAsync ? await Ts7Host.openAsync(projectRoot) : await Ts7Host.open(projectRoot);
   try {
     const project = host.getProject();
 
@@ -91,12 +94,16 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
     // compile must not produce an assembly.
     // JSII_TS7_SKIP_TYPECHECK=1 is a measurement-only switch (isolates the cost
     // of the diagnostics pass); it must never be used for real builds.
-    const tsDiagnostics = process.env.JSII_TS7_SKIP_TYPECHECK ? [] : collectTsDiagnostics(project.program);
+    const tsDiagnostics = process.env.JSII_TS7_SKIP_TYPECHECK
+      ? []
+      : useAsync
+      ? await collectTsDiagnosticsAsync(project.program)
+      : collectTsDiagnostics(project.program);
     if (tsDiagnostics.some((d) => d.category === ts.DiagnosticCategory.Error)) {
       return { typeCount: 0, emittedFiles: [], emitSkipped: true, diagnostics: tsDiagnostics };
     }
 
-    const assembler = new Ts7Assembler(host.ts7, project, {
+    const assemblerOptions = {
       packageJson: pkg,
       projectInfo,
       projectRoot,
@@ -106,9 +113,14 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
       stripDeprecated: options.stripDeprecated ?? !!pkg['cdk-build']?.stripDeprecated,
       stripDeprecatedAllowListFile: options.stripDeprecatedAllowListFile,
       readme: loadReadme(projectRoot),
-    });
+    };
+    const assembler = useAsync
+      ? new Ts7AsyncAssembler(host.ts7, project, assemblerOptions)
+      : new Ts7Assembler(host.ts7, project, assemblerOptions);
 
-    const assembly = assembler.assemble();
+    const assembly = useAsync
+      ? await (assembler as Ts7AsyncAssembler).assemble()
+      : (assembler as Ts7Assembler).assemble();
 
     if (process.env.JSII_TS7_TIMING) {
       LOG.info(`ts7 doc-cache hits (RPCs avoided): ${assembler.docCacheHits}`);
@@ -129,6 +141,7 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
         assembly,
         outDir: pkg.jsii?.tsc?.outDir,
         rootDir: pkg.jsii?.tsc?.rootDir,
+        emitResult: useAsync ? await project.program.emit() : undefined,
       }));
     } catch (err) {
       LOG.error(`ts7 backend: emit pipeline failed: ${(err as Error).stack ?? (err as Error).message}`);
@@ -150,7 +163,7 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
     };
   } finally {
     if (process.env.JSII_TS7_TIMING) {
-      const t = host.getTimingInfo?.();
+      const t = useAsync ? await host.getTimingInfoAsync() : host.getTimingInfo?.();
       if (t?.totals) {
         LOG.info(
           `ts7 timing: requests=${t.totals.requestCount} roundTripMs=${Math.round(t.totals.roundTripMs)} ` +
@@ -161,7 +174,11 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
         );
       }
     }
-    host.close();
+    if (useAsync) {
+      await host.closeAsync();
+    } else {
+      host.close();
+    }
   }
 }
 
@@ -178,8 +195,13 @@ function collectTsDiagnostics(program: any): ts.Diagnostic[] {
     ...call('getSyntacticDiagnostics'),
     ...call('getSemanticDiagnostics'),
   ];
+  return raw.map((d) => toTsDiagnostic(d, sourceReader()));
+}
+
+/** Memoizing reader that parses a file with the classic compiler for diagnostic rendering. */
+function sourceReader(): (fileName: string) => ts.SourceFile | undefined {
   const sourceFiles = new Map<string, ts.SourceFile | undefined>();
-  const readSource = (fileName: string): ts.SourceFile | undefined => {
+  return (fileName: string): ts.SourceFile | undefined => {
     if (!sourceFiles.has(fileName)) {
       let sf: ts.SourceFile | undefined;
       try {
@@ -191,7 +213,19 @@ function collectTsDiagnostics(program: any): ts.Diagnostic[] {
     }
     return sourceFiles.get(fileName);
   };
-  return raw.map((d) => toTsDiagnostic(d, readSource));
+}
+
+/** SPIKE: async-API counterpart of collectTsDiagnostics (each program.get*Diagnostics() is a promise). */
+async function collectTsDiagnosticsAsync(program: any): Promise<ts.Diagnostic[]> {
+  const call = async (name: string): Promise<any[]> =>
+    typeof program[name] === 'function' ? (await program[name]()) ?? [] : [];
+  const raw: any[] = [
+    ...(await call('getProgramDiagnostics')),
+    ...(await call('getGlobalDiagnostics')),
+    ...(await call('getSyntacticDiagnostics')),
+    ...(await call('getSemanticDiagnostics')),
+  ];
+  return raw.map((d) => toTsDiagnostic(d, sourceReader()));
 }
 
 /**

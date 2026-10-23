@@ -27,6 +27,8 @@ const LOG = log4js.getLogger('jsii/ts7');
 export interface Ts7EmitPipelineOptions {
   readonly projectRoot: string;
   readonly assembly: spec.Assembly;
+  /** SPIKE: pre-computed `program.emit()` result (the async API's emit is a promise). */
+  readonly emitResult?: any;
   /** tsc `outDir` from the jsii config (for mapping source -> emitted js path). */
   readonly outDir?: string;
   /** tsc `rootDir` from the jsii config. */
@@ -92,7 +94,7 @@ export function runTs7EmitPipeline(project: Ts7Project, options: Ts7EmitPipeline
   // Whole-project emit (see the function docblock for why this is one RPC).
   // `program.emit()` writes to the host filesystem and returns
   // { emitSkipped, diagnostics, emittedFiles } with absolute file names.
-  const result = program.emit();
+  const result = options.emitResult ?? program.emit();
   if (result?.emitSkipped) {
     const reasons = (result.diagnostics ?? []).map((d: any) => d.text ?? d.messageText ?? String(d)).slice(0, 5);
     throw new Error(`TypeScript emit was skipped${reasons.length ? `: ${reasons.join('; ')}` : ''}`);

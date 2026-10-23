@@ -44,6 +44,8 @@ export interface Ts7Api {
   /* eslint-enable @typescript-eslint/naming-convention */
   /** Combines request generators so `api.batch(all(...))` issues them in one round-trip. */
   readonly all: (...generators: any[]) => any;
+  /** SPIKE: the `typescript/async` API class (pipelined client), same object model, promise-returning. */
+  readonly AsyncAPI: any;
   /** Directory of the `typescript` package the API was loaded from. */
   readonly packageDir: string;
   /** Version of that package. */
@@ -133,11 +135,14 @@ export async function loadTs7Api(projectRoot: string): Promise<Ts7Api> {
   // The package is ESM; import its entry points by file URL so the alias name
   // never matters and the package-internal `#enums/*` imports keep resolving.
   const apiUrl = pathToFileURL(path.join(packageDir, 'dist', 'api', 'sync', 'api.js')).href;
+  const asyncApiUrl = pathToFileURL(path.join(packageDir, 'dist', 'api', 'async', 'api.js')).href;
   const astUrl = pathToFileURL(path.join(packageDir, 'dist', 'ast', 'index.js')).href;
   let apiModule: any;
+  let asyncApiModule: any;
   let astModule: any;
   try {
     apiModule = await import(apiUrl);
+    asyncApiModule = await import(asyncApiUrl);
     astModule = await import(astUrl);
   } catch (err) {
     throw new Error(
@@ -153,6 +158,7 @@ export async function loadTs7Api(projectRoot: string): Promise<Ts7Api> {
     TypeFlags: apiModule.TypeFlags,
     SyntaxKind: astModule.SyntaxKind,
     all: apiModule.all,
+    AsyncAPI: asyncApiModule.API,
     packageDir,
     version,
   };

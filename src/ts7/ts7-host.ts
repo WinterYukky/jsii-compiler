@@ -50,12 +50,51 @@ export class Ts7Host {
     return new Ts7Host(ts7, api, snapshot, tsconfigPath);
   }
 
+  /**
+   * SPIKE: open an `typescript/async` session (JSII_TS7_ASYNC=1). Same object
+   * model as the sync API but every call returns a promise, and requests issued
+   * in the same macrotask are coalesced into one `batchRequests` round-trip.
+   */
+  public static async openAsync(projectRoot: string, tsconfigFileName = 'tsconfig.json'): Promise<Ts7Host> {
+    const ts7 = await loadTs7Api(projectRoot);
+    const tsconfigPath = path.join(projectRoot, tsconfigFileName);
+    const collectTiming = !!process.env.JSII_TS7_TIMING;
+    const api = new ts7.AsyncAPI({ cwd: projectRoot, collectTiming });
+    const snapshot = await api.createSnapshot({ openProjects: [tsconfigPath] });
+    return new Ts7Host(ts7, api, snapshot, tsconfigPath, true);
+  }
+
   private constructor(
     public readonly ts7: Ts7Api,
     private readonly api: any,
     private readonly snapshot: any,
     public readonly tsconfigPath: string,
+    /** SPIKE: true when opened with the async API (every API call returns a promise). */
+    public readonly isAsync: boolean = false,
   ) {}
+
+  /** SPIKE: async-API counterpart of `getTimingInfo` (the async client returns a promise). */
+  public async getTimingInfoAsync(): Promise<any> {
+    try {
+      return await this.api.getTimingInfo();
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** SPIKE: close for the async API (dispose + close are promises there). */
+  public async closeAsync(): Promise<void> {
+    try {
+      await this.snapshot.dispose();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await this.api.close();
+    } catch {
+      /* ignore */
+    }
+  }
 
   /** RPC timing info (requestCount/bytes) when JSII_TS7_TIMING is enabled. */
   public getTimingInfo(): any {
