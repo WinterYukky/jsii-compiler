@@ -822,3 +822,167 @@ traversal batches densely (visit), and slower wherever it cannot (order-dependen
 registration), so at jsii's traversal granularity it loses overall.
 
 Raw logs archived off-repo (`ts7-spike-async-raw-20261023.tar.gz`).
+
+## Phase 4 — where the TypeScript side could help (code reading + measurements)
+
+Goal: before proposing anything upstream, find the *cause* of the three
+remaining TypeScript-side suspects from Phase 3 and bring each to a fix
+candidate with a measured or extrapolated saving. Code read:
+microsoft/TypeScript main a91e938, `tsc/internal/{ipc,api,project,checker}`;
+client `typescript@7.1.0-beta` `dist/api/syncChannel.js`. Measurements:
+aws-cdk-lib fixture on the same c7i.4xlarge class as Phase 3; the "real
+aws-cdk-lib" column is a ratio conversion (×1.13, 792k/698k requests), not a
+measurement.
+
+### 4A — "all round trips get ~2x slower after a big message" (Phase 3B)
+
+What the code says: the sync connection handles each request inline on the
+read loop (no goroutine per request); the batch handler is a sequential `for`
+plus a sequential `json.Marshal` per element. Nothing in the request path
+changes shape after a large message.
+
+Decisive experiment — the thread-handoff hypothesis is **rejected**:
+
+| fixture, same box | wall | server | transport |
+|---|---|---|---|
+| default | 46.1s / 48.6s | 19.6s | 15.1s |
+| batch (chunk 1000) | 49.6s / 57.3s | 19.6s | 18.9s |
+| batch + `GOMAXPROCS=1` | 119.5s / 113.0s | **46.2s** | 56.9s |
+| batch + `GOMAXPROCS=2` | 69.6s | 28.6s | 28.4s |
+| default + `GOMAXPROCS=1` | 110.5s | 45.5s | 50.4s |
+
+Restricting the Go runtime to one P makes everything 2.4x slower: the request
+loop is single-goroutine, but the background GC mark workers (27% of Go CPU in
+the Phase 3 pprof) run on the other cores; with one P they serialize onto the
+request path. `schedtrace`: 69 threads, 15 idle Ps, run queue 0 throughout.
+Per-thread context switches / migrations do not differ between modes.
+
+Echo time series (one big echo, then the latency of the following small echoes,
+by distance k; 5 repetitions; median / p90):
+
+| big message | k=1..10 | k=11..100 | k>100 |
+|---|---|---|---|
+| 0.3 MB | 13.1 / 18.7 µs | 8.3 / 16.8 | 8.1 / 9.2 (= floor) |
+| 1 MB | 29.1 / 355 µs | 8.5 / 16.4 | floor |
+| 10 MB | 30.4 / 380 µs | 11.6 / 16.6 | floor |
+| 43 MB | 29.9 / 455 µs | 15.7 / 28.6 | floor |
+
+The penalty is **transient** (≈1–2 ms in total per big message, gone after
+~100 requests) and **direction-dependent**: a 0.89 MB *response* alone
+(`getSourceFile`) costs 9.2 µs at k=1..10, i.e. nothing. That resolves the
+Phase 3 contradiction (1,657 × 43 MB source-file *responses* in default mode
+are harmless; the batch path sends large *requests*). Frequency sweep (300 KB
+request every F small ones): F=30 → mean 14.7 µs (+70%), F=100 → 10.7,
+F=400 → 9.2, F=2000 → 8.7. Threshold for a steady-state penalty: about one
+large request per 100.
+
+Quantitative check (candidate "bound the batch request size"): chunk 1000 →
+100 / 50 symbols per batched docs request, 2 interleaved rounds:
+
+| fixture | wall | transport |
+|---|---|---|
+| default | 47.8s / 47.7s | 17.7s |
+| batch chunk 1000 | 65.6s / 61.4s | 31.9s / 28.0s |
+| batch chunk 100 | 63.4s / 62.7s | 29.4s / 29.3s |
+| batch chunk 50 | 61.1s / 60.5s | 28.4s / 27.1s |
+
+`.jsii` identical. Smaller requests recover ~1–4s of the ~14–18s regression —
+consistent with the echo-derived ~3s for the transient stall — and **leave
+~10s unexplained**. What is known about the remainder: it is wait time outside
+Go's `processingTime` and outside Node's CPU (Phase 3 cpu-prof), it is not Go
+GC (`GOGC=off` unchanged, Phase 3), not scheduler handoff (above), and it
+scales the per-request cost of *every* non-batch request (26 → 60 µs) rather
+than the batch requests themselves. Its magnitude varies between sessions
+(+4s to +20s on identical inputs). Next instrument, not run here: a Go
+`runtime/trace` of the server during a batch run to see where the request
+goroutine sits between `read` returning and `write` being issued.
+
+### 4B — the synchronous round-trip floor
+
+Static count per round trip (code): 4 syscalls (Node `writeSync`, Go `read`
+into a 4 KB bufio, Go `write` + `Flush`, Node `readSync` into a 64 KB
+read-ahead), ~8 Go allocations (method bytes, payload, `string(method)`,
+`Message`, params via json/v2, `sync.OnceFunc` closure in
+`getPersistentChecker`, the 17-field `TypeResponse`, the marshal buffer),
+2 mutex + 1 channel + 1 RLock acquisitions, ~3 Node allocations
+(`allocUnsafeSlow` + copy, `toString('utf-8')`, `JSON.parse`).
+`binary.Read/Write` (reflection) only for payloads ≥ 256 B.
+
+Measured (echo, 20k samples): **median 8.1 µs** for 100 B, 7.4 µs for 0 B,
+p90 8.9 µs. The Phase 3 "16 µs" was a mean over a short warm-up window and is
+superseded. `strace -c` on the server during a steady run: read 32.9k, write
+34.1k, futex 869, nanosleep 9.1k (sysmon) per 5 s — matching the static count
+(one read + one write per request); each read/write syscall ≈ 2 µs.
+
+CPU placement (`taskset`, both processes): same CPU → **5.0 µs** (−38%), SMT
+siblings → 7.5 µs, two physical cores → 8.7 µs, unpinned → 8.1 µs. The
+cross-CPU wake-up accounts for ~3 µs of the floor.
+
+So, reconciled with the static estimate: floor 8 µs ≈ 4 syscalls (~2–3 µs) +
+two cross-CPU wake-ups (~3–4 µs) + framing; the static guess of "14 µs of
+wake-up" was too high. The real API's 26 µs/request leaves **~18 µs of per-
+request CPU work** (Go dispatch/handle/marshal + Node decode), which is where
+the Go allocations and GC pressure (27% of server CPU) live — not in the pipe.
+
+### 4C — server-side parallelism for `batchRequests`
+
+Constraint, confirmed in code and now treated as fixed: the API session uses a
+single persistent checker (`project/checkerpool.go`: "A single checker for API
+operations, providing stable instance identity for reference equality on
+type/symbol handles"); `checker.newType` assigns `t.id = TypeId(c.TypeCount)`
+from a per-checker, non-atomic counter, and the checker carries 45 cache maps
+behind the pool's mutex. Read-style API calls still instantiate types lazily,
+so (a) concurrent use of one checker races the id counter and the caches, and
+(b) a second checker gives the same type a different id. jsii's
+`typeFqnBySymbolId` and doc caches depend on those ids being stable. Any
+parallelism must therefore keep **one checker, one goroutine** for checker
+work.
+
+### Candidates (ranked; savings on the fixture, real aws-cdk-lib by ×1.13 ratio)
+
+1. **Coarse-grained endpoints (TypeScript side, the main proposal).** Replace
+   the per-member round trips with a few per-type calls (table below). Keeps
+   one checker; the handler just does more work per request. Expected: 698k →
+   ~60–80k requests, **−9 to −12s** on the fixture (−10 to −14s real), i.e.
+   most of the ~13s round-trip tax. Medium change on both sides.
+2. **Per-request allocation / GC reduction in the Go server** (TypeResponse
+   object per call, json/v2 marshal buffers, `make([]byte, size)` per message,
+   `sync.OnceFunc` per checker acquisition). GC is 27% of server CPU (~5s);
+   with `GOMAXPROCS=1` it becomes 25s of serialized work. Expected −2 to −4s
+   (−2.5 to −4.5s real). Safe for id identity. Medium effort.
+3. **Explain the remaining ~10s of the batch regression** (4A) before any
+   further batching work; the 1-in-100 request-size threshold is a usable rule
+   today (jsii: chunk ≤ 50–100 only recovers 1–4s, not enough on its own).
+4. **CPU affinity from the server** (`sched_setaffinity` to the parent's CPU):
+   floor −3 µs × 698k ≈ **−2s**, one-liner, but fragile (the Node process
+   migrates) — a possible default for the sync API server, not a jsii concern.
+5. Hand-written length headers / payload buffer reuse: ≈ −1 µs per round trip,
+   ≈ −0.7s. Low priority.
+Not worth pursuing (measured): `GOMAXPROCS` limits, `LockOSThread`-style
+pinning of the request goroutine, response-payload reduction, Node-side JSON.
+
+### Coarse-endpoint mapping (what each jsii traversal would collapse into)
+
+Per-type request counts are from the Phase 3 per-method table (fixture:
+20,221 types, 97k members, 698k requests). "Today" counts the sync RPCs the
+traversal issues; "proposed" is one request unless noted. All proposals return
+handles produced by the single API checker, so ids stay identical.
+
+| jsii traversal | today (RPCs) | proposed endpoint | saving |
+|---|---|---|---|
+| per member: `getJsDocTags` + `getDocumentationComment` (after jsii's own cache) | 134k + 117k | `getSymbolDocumentations(symbols[])` per type (= Phase 2E E1, which was a win on the fork; the 7.1 `batchRequests` equivalent regresses, see 4A) | ~250k → ~20k |
+| per member: `getTypeOfSymbolAtLocation(member, decl)` + `getTypeAtLocation(owner)` for the declaring type | 105k + 125k | `getMembersOfType(type)`: properties with declaring-type symbol id, declared type, first declaration handle, flags | ~230k → ~20k |
+| per type: `getTypeAtLocation(decl)`, `getPropertiesOfType`, `getTypeOfSymbol(static side)`, `getPropertiesOfType(static)`, `getBaseTypes`, `getFullyQualifiedName` | ~6 × 20k = 120k | `describeType(decl)` returning the above in one response | 120k → 20k |
+| per method: `getSignatureFromDeclaration` + `getReturnTypeOfSignature` + parameters' `getTypeOfSymbolAtLocation` + `getTypeArguments` (Promise unwrap) | 14k + 12k + ~30k + 10k | `getSignatureDetails(decl)`: return type, parameter types, resolved Promise argument | ~66k → 14k |
+| per type reference: `getTypeFromTypeNode` on union constituents, `getIndexInfosOfType`, `getTypeArguments` on arrays | 47k + 0.5k + ~10k | fold into the type responses above (`elementType` / `indexValueType` / `unionConstituents` fields on `TypeResponse`) | ~57k → ~0 |
+| registration pass: `getExportsOfModule` recursion, `getAliasedSymbol`, `resolve()` of each type declaration (the 391 MB of source files) | 0.6k + 7k + 1.7k | `getExportedTypes(module)` recursive, alias-resolved, with declaration kind/path — avoids fetching whole source files just to read the declaration | ~9k → ~0.6k and −390 MB |
+
+Total: ~698k → roughly 60–80k requests. The round-trip tax (Phase 3: ~13s) and
+most of the 391 MB source-file transfer would go; the ~18 µs of per-request CPU
+work does not disappear but is amortized (one handler, one marshal per type
+instead of per member). The risk is in laziness (Phase 2E): `getMembersOfType`
+must return declared types only for members the caller will use, so the
+endpoint should take the filtered member list, not materialize every member.
+
+Raw logs archived off-repo (`ts7-stepb-raw-20261023.tar.gz`,
+`ts7-batchchunk-raw-20261023.tar.gz`).
