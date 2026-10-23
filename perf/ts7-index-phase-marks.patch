@@ -1,0 +1,108 @@
+diff --git a/src/ts7/index.ts b/src/ts7/index.ts
+index c3dbdca..de8b4f4 100644
+--- a/src/ts7/index.ts
++++ b/src/ts7/index.ts
+@@ -34,6 +34,15 @@ const sortJson = require('sort-json');
+ 
+ const LOG = log4js.getLogger('jsii/ts7');
+ 
++/**
++ * Measurement-only phase marks (research branch). When the measurement preload
++ * (`perf/rpc-hook.cjs`) is loaded it installs `globalThis.__legePerfMark`; every
++ * mark records wall time + the number of RPCs issued so far. No-op otherwise.
++ */
++function perfMark(name: string): void {
++  (globalThis as any).__legePerfMark?.(name);
++}
++
+ export interface Ts7EmitOptions {
+   readonly projectRoot: string;
+   readonly projectInfo: ProjectInfo;
+@@ -82,9 +91,19 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
+   const pkg = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
+   const entry = deriveEntry(projectRoot, pkg);
+ 
++  perfMark('start');
++  await (globalThis as any).__legePerfReady;
+   const host = await Ts7Host.open(projectRoot);
++  perfMark('host-open');
+   try {
+     const project = host.getProject();
++    perfMark('project');
++    // Measurement-only: JSII_PERF_GO_PPROF=<dir> records a Go CPU profile on the
++    // server for everything between here and close (pprof .pb.gz written by tsgo).
++    const pprofDir = process.env.JSII_PERF_GO_PPROF;
++    if (pprofDir) {
++      (project.api.debug ?? project.api).startCPUProfile(pprofDir);
++    }
+ 
+     // Surface TypeScript compilation errors BEFORE assembling, with the same
+     // reject-on-error behaviour as the default backend: a program that does not
+@@ -92,6 +111,7 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
+     // JSII_TS7_SKIP_TYPECHECK=1 is a measurement-only switch (isolates the cost
+     // of the diagnostics pass); it must never be used for real builds.
+     const tsDiagnostics = process.env.JSII_TS7_SKIP_TYPECHECK ? [] : collectTsDiagnostics(project.program);
++    perfMark('typecheck');
+     if (tsDiagnostics.some((d) => d.category === ts.DiagnosticCategory.Error)) {
+       return { typeCount: 0, emittedFiles: [], emitSkipped: true, diagnostics: tsDiagnostics };
+     }
+@@ -109,6 +129,7 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
+     });
+ 
+     const assembly = assembler.assemble();
++    perfMark('assemble');
+ 
+     if (process.env.JSII_TS7_TIMING) {
+       LOG.info(`ts7 doc-cache hits (RPCs avoided): ${assembler.docCacheHits}`);
+@@ -118,6 +139,7 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
+     // so the on-disk format (incl. the compressed file-redirect variant) matches
+     // the strada path exactly.
+     writeAssembly(projectRoot, fingerprint(assembly), { compress: options.compressAssembly ?? false });
++    perfMark('write-assembly');
+ 
+     // Then emit JS/d.ts and inject jsii rtti (post-emit pass). An emit failure
+     // fails the build (emitSkipped + a synthetic diagnostic); the assembly file
+@@ -130,6 +152,7 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
+         outDir: pkg.jsii?.tsc?.outDir,
+         rootDir: pkg.jsii?.tsc?.rootDir,
+       }));
++      perfMark('emit');
+     } catch (err) {
+       LOG.error(`ts7 backend: emit pipeline failed: ${(err as Error).stack ?? (err as Error).message}`);
+       return {
+@@ -149,6 +172,14 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
+       diagnostics: tsDiagnostics, // non-error diagnostics (warnings/suggestions) pass through
+     };
+   } finally {
++    if (process.env.JSII_PERF_GO_PPROF) {
++      try {
++        const api = host.getProject().api;
++        LOG.info(`ts7 go pprof: ${JSON.stringify((api.debug ?? api).stopCPUProfile())}`);
++      } catch (err) {
++        LOG.warn(`ts7 go pprof: stopCPUProfile failed: ${(err as Error).message}`);
++      }
++    }
+     if (process.env.JSII_TS7_TIMING) {
+       const t = host.getTimingInfo?.();
+       if (t?.totals) {
+@@ -162,6 +193,7 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
+       }
+     }
+     host.close();
++    perfMark('close');
+   }
+ }
+ 
+@@ -171,7 +203,11 @@ export async function ts7Emit(options: Ts7EmitOptions): Promise<Ts7EmitResult> {
+  * jsii reporting pipeline prints them exactly like the default backend does.
+  */
+ function collectTsDiagnostics(program: any): ts.Diagnostic[] {
+-  const call = (name: string): any[] => (typeof program[name] === 'function' ? program[name]() ?? [] : []);
++  const call = (name: string): any[] => {
++    const result = typeof program[name] === 'function' ? program[name]() ?? [] : [];
++    perfMark(`diag:${name}`);
++    return result;
++  };
+   const raw: any[] = [
+     ...call('getProgramDiagnostics'),
+     ...call('getGlobalDiagnostics'),
