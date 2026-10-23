@@ -769,3 +769,56 @@ batch cost per se.
 Not worth pursuing (measured): `GOGC`/`GOMAXPROCS` tuning (no effect); shrinking
 response payloads (bytes cost ≈ 1 µs per request at the observed sizes); Node-side
 JSON/decoding work (≈ 2.5s total).
+
+## Phase 3E — spike: pipelined assembler on `typescript/async` (closed, retreated)
+
+Hypothesis from 3D: visiting independent types concurrently on the async client
+(which coalesces same-tick requests into one `batchRequests`) could remove the
+~13s of serialized round-trip wait. Branch `spike/async-fanout-1792738229`:
+a mechanical `await` port of `assembler.ts` (`assembler-async.ts`, opt-in via
+`JSII_TS7_ASYNC=1`), type-level fan-out (every registered type is visited
+anyway, so no laziness boundary is crossed), per-visit stability in an
+`AsyncLocalStorage`, in-flight doc promises coalesced in the existing caches.
+
+Parity gate: `.jsii` identical to the sync backend (fingerprint aside) on
+constructs and on the aws-cdk-lib fixture (20,221 types / 97,071 members), for
+both iterations below.
+
+| run (fixture, same c7i.4xlarge, 3-run median) | wall | wire requests | roundTrip | server | recv |
+|---|---|---|---|---|---|
+| ts7 sync (default) | **45.4s** | 698k | 36.4s | 19.1s | 618 MB |
+| async v1: chunked `Promise.all`, width 256 | 74.5s | 69.5k | 57.9s | 23.5s | 796 MB |
+| async v1, width 64 / 1024 | 94.5s / 68.0s | | | | |
+| async v2: sliding window + registration prefetch | **59.6s** | 22.1k | 41.4s | 23.7s | 1,508 MB |
+| async v2, width 64 / 1024 | 66.9s / 62.2s | | | | |
+
+Batch-size histogram (preload `perf/async-batch-hook.cjs`, by phase):
+
+- v1: 69,554 batches for 699,636 requests = **10.1 requests/batch**, 51,983
+  (75%) of them single-request round-trips. At ~0.5 ms per async round-trip
+  (vscode-jsonrpc; same figure as the 3D microbenchmark) that is ~35s, which
+  matches the measured transport overhead (34.4s).
+- v2: the visit phase batches well — 2,845 batches, **avg 229 requests/batch**,
+  652k requests in 10.1s of round-trip time (the sync backend waits ~25s for the
+  same traversal). The registration pass does not: 19,222 batches, 53k
+  requests, avg 2.8, 18.8k singles, **23.4s**. The submodule recursion
+  (`collect`, 614 modules) and the nested-exports walk in `_registerType` are
+  order-dependent and stayed sequential; the prefetch only covered alias
+  resolution and the docs/declaration reads.
+
+Costs specific to the async client (measured): received bytes 618 MB → 1,508 MB
+(batch responses are JSON-wrapped), server time +4.5s, Node-side CPU up
+(materialization 6.3s, jsonrpc framing 2.7s, GC 2.2s) — roughly +8s of fixed
+cost that a fully parallel traversal would still carry.
+
+Decision: **retreated** per the pre-agreed rule (needed ≥3s faster than default;
+got 14s slower). Extrapolation, not a measurement: parallelizing the registration
+pass to the visit phase's density would put the async path at ~38–40s (−6s vs
+default, ~2.1x classic), at a parity risk (canonical-first registration order)
+and 0.5–1 day of work; it would not reach the 1.6x-of-sync (~28s) the
+microbenchmark suggested because of the fixed costs above. Finding kept: the
+async API's ~0.5 ms round-trip floor makes it 2.5x faster than sync where a
+traversal batches densely (visit), and slower wherever it cannot (order-dependent
+registration), so at jsii's traversal granularity it loses overall.
+
+Raw logs archived off-repo (`ts7-spike-async-raw-20261023.tar.gz`).
