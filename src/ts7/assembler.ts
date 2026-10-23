@@ -274,7 +274,9 @@ export class Ts7Assembler {
     }
     // Chunked so a single request stays well under the RPC message-size sweet
     // spot observed during measurement (larger chunks saved no time).
-    const CHUNK = 1000;
+    // Measurement switch (research): JSII_TS7_BATCH_CHUNK bounds the symbols per
+    // batched request, i.e. the request payload size sent to the server.
+    const CHUNK = Math.max(1, Number(process.env.JSII_TS7_BATCH_CHUNK ?? 1000));
     for (let i = 0; i < wanted.length; i += CHUNK) {
       const chunk = wanted.slice(i, i + CHUNK);
       const [tags, comments] = api.batch(
