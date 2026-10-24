@@ -1220,3 +1220,99 @@ assembler/decode/write work, the rest startup.
 
 Raw logs archived off-repo (`ts7-coarse-raw-20261024.tar.gz`,
 `ts7-cdklib-coarse-raw-20261024.tar.gz`).
+
+### Phase 5C addendum — `getMembersOfType` filter generalised into neutral predicates
+
+The first filter (Phase 5C) baked jsii's member policy into switches
+(`excludeInternal`, `excludeDeprecated`, `excludePrivate`, `excludeNames`,
+`ownerSymbols`, `parameterPropertyOwner`): unusable by other tools and, as the
+ECMAScript-private-field leak showed, a server/client judgement mismatch waiting
+to happen. Branch `api/coarse-endpoints-generic-filter-1792824451` replaces it
+with predicates the caller combines like a WHERE clause; the response shape is
+unchanged.
+
+| old switch (jsii-specific) | new predicate | other uses |
+|---|---|---|
+| `excludeInternal` (@internal or `_` prefix) | `excludeJsDocTags: ["internal"]` + `excludeNamePattern: "^_"` | TypeDoc `["hidden"]`, API extractor `["alpha","beta"]` |
+| `excludeDeprecated` | `excludeJsDocTags: [..., "deprecated"]` | any "current API only" view |
+| `excludePrivate` | `visibility: ["public","protected"]` (ECMAScript `#x` counts as private) | public-surface docs: `["public"]` |
+| `excludeNames: ["prototype"]` | `excludeNamePattern: "^(_\|prototype$)"` | any naming convention (RE2) |
+| `ownerSymbols` | `includeInheritedFrom: { declaringTypes: [...] }` (`{}` = own only, omitted = all) | flattened vs. per-type member listings |
+| `parameterPropertyOwner` (effective-ctor rule) | removed — jsii re-judges on the client from the member's `owner` reference | — |
+| — | `kinds: ["property"\|"accessor"\|"method"\|"parameterProperty"]` | method-only / data-only views |
+
+jsii's whole policy becomes `{ visibility: ['public','protected'],
+excludeJsDocTags: ['internal' (+ 'deprecated' when stripping without an
+allow-list)], excludeNamePattern: '^_' (static side `'^(_|prototype$)'`),
+includeInheritedFrom: { declaringTypes: erasedBases }, includeDeclaredType: true }`
+(jsii spike 7a8221f). Two client-side judgements stay in jsii by design:
+allow-listed deprecation stripping (per-fqn) and the effective-constructor rule
+for parameter properties (over-return, then filter — cheaper than a parity bug).
+
+Verification on the fork build (c7i.xlarge, 4 vCPU, spin on, C6 on): fixture
+`.jsii` identical to the fine-grained path (20,221 types); constructs identical.
+Wall 2 runs: fine 42.8 / 43.8s, coarse (generic filter) **37.3 / 37.2s**
+(−5.7s), requests 698k → 304k, sent 131 → 46 MB — the same gain as the
+jsii-specific filter (Phase 5C: −5.1s on the 16 vCPU box), so the
+generalisation costs nothing measurable. Go tests: 3 (predicate combination,
+inherited-from + kinds + invalid pattern, docs equivalence); `go test
+./internal/api/` passes.
+
+## Phase 5D — spin-poll on small hosts and quiet workloads (closed)
+
+Question before proposing the spin-poll upstream: does it hurt when the two
+processes compete for cores, or when requests are sparse? Same fork build
+(generic-filter branch, which includes the adaptive variant), fixture, spin
+budget 100 us, C6 on.
+
+**Cores.** c7i.xlarge (4 vCPU) and the same box with both processes pinned to
+2 CPUs (`taskset -c 0,1`; c7i.large itself cannot run the fixture — 3.8 GB RAM,
+OOM-killed on every run). CPU seconds are per process at end of run.
+
+| box | mode | coarse wall (2 runs) | node / tsgo CPU s | fine wall |
+|---|---|---|---|---|
+| 4 vCPU | spin off | 39.1 / 38.6 | 14.3 / 56.0 | — |
+| 4 vCPU | spin 100 | **37.3 / 37.2** | 18.0 / 57.7 | 42.8 / 43.8 |
+| 4 vCPU | adaptive | 37.5 / 37.3 | 18.0 / 57.6 | — |
+| 2 CPUs (pinned) | spin off | 41.9 / 41.4 | 12.7 / 40.6 | 50.0 |
+| 2 CPUs (pinned) | spin 100 | **40.8 / 40.9** | 16.2 / 45.0 | 47.0 |
+| 2 CPUs (pinned) | adaptive | 41.2 / 40.5 | 16.6 / 45.1 | — |
+
+Spin never loses: −1.9s on 4 vCPU, −1.0s (coarse) / −3.0s (fine) with only
+two CPUs for both processes. The gain shrinks as cores shrink because the Go
+server's background work (GC, parallel checker/emit) already keeps the second
+core busy, so there is less idle to wake up from — but the extra CPU
+(+4s node, +2–4s tsgo) is paid back in wall-clock even there.
+
+**Quiet workloads** (echo bench, 4 vCPU; node / tsgo CPU seconds):
+
+| workload | spin off | spin 100 | adaptive |
+|---|---|---|---|
+| 20k back-to-back echoes | 0.17s wall, 0.12 / 0.08 | 0.21s, 0.23 / 0.21 | 0.21s, 0.23 / 0.20 |
+| client idle 10 ms between 300 requests | 3.08s, 0.02 / 0.02 | 3.13s, **0.05 / 0.09** | 3.13s, 0.06 / 0.04 |
+| ~ms of server work per request ×100 | 0.07s, 0.00 / 0.26 | 0.12s, 0.01 / 0.39 | 0.04s, 0.01 / 0.04 |
+| 50 fast then 1 slow ×40 | 0.03s, 0.03 / 0.03 | 0.14s, 0.07 / 0.46 | 0.05s, 0.04 / 0.04 |
+
+The only measurable cost of always-on spin is on sparse traffic: one wasted
+100 us budget per message (≈ +0.1 ms CPU per request, here +0.1s over 3s of
+mostly idle time), and on mixed traffic the server spins its budget after each
+slow reply. The adaptive variant (suspend after 3 consecutive waits > 1 ms,
+resume after 3 waits < 1 ms; `TSGO_SYNC_SPIN_ADAPTIVE=1`) removes that cost
+(0.04 vs 0.46 tsgo CPU s on the mixed workload) while keeping the dense-traffic
+gain within noise of always-on (37.5 vs 37.3s). Note the first adaptive cut used
+the spin budget itself as the "peer is idle" criterion and was useless on hosts
+with deep idle states (a blocked read returns after ~200 us even when the peer
+answered immediately); the 1 ms threshold fixed that.
+
+**Recommendation for the upstream proposal:** adaptive spin, enabled by default
+on Unix, budget 100 us, with `TSGO_SYNC_SPIN_US=0` as the off switch. No case
+measured here gets slower; the worst case (sparse traffic) costs ~0.1 ms CPU per
+message before adaptation kicks in. Windows is **unverified** (named pipes have
+no `poll`; the current code is a no-op there). Not measured: hosts with fewer
+than 2 physical cores available to the pair, and containers with CPU quotas
+(cgroup throttling could turn spin time into throttled time — worth one run
+before the PR).
+
+Raw logs archived off-repo (`ts7-5d-4vcpu-raw-20261024.tar.gz`,
+`ts7-5d-pin2cpu-raw-20261024.tar.gz`, `ts7-5d-2vcpu-raw-20261024.tar.gz` — the
+last one is the OOM evidence only).
