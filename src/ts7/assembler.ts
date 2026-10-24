@@ -246,7 +246,52 @@ export class Ts7Assembler {
    * not by round-trips. Kept as a switch so it can be re-evaluated as the API
    * evolves. No-ops gracefully when batching is unavailable.
    */
+  /**
+   * Whether the coarse-grained traversal endpoints (`getSymbolDocumentations`,
+   * `getMembersOfType`) are available on this TypeScript API and not disabled
+   * (JSII_TS7_COARSE=0, measurement switch). Research: TypeScript fork branch
+   * `api/coarse-endpoints`.
+   */
+  private get _coarse(): boolean {
+    return (
+      process.env.JSII_TS7_COARSE !== '0' &&
+      typeof this.checker.getSymbolDocumentations === 'function' &&
+      typeof this.checker.getMembersOfType === 'function'
+    );
+  }
+
+  /** Store a symbol's docs (as returned by the coarse endpoints) in the doc caches. */
+  private _storeDocs(sym: any, tags: any[], comment: string): void {
+    const key = this._symbolDocKey(sym);
+    if (key == null) {
+      return;
+    }
+    this._jsDocTagsCache.set(key, tags ?? []);
+    this._docCommentCache.set(key, comment === '' || comment == null ? null : comment);
+  }
+
   private _prefetchDocs(syms: any[]): void {
+    if (this._coarse) {
+      const wanted: any[] = [];
+      const seen = new Set<string>();
+      for (const sym of syms) {
+        const key = sym ? this._symbolDocKey(sym) : undefined;
+        if (!key || seen.has(key) || (this._jsDocTagsCache.has(key) && this._docCommentCache.has(key))) {
+          continue;
+        }
+        seen.add(key);
+        wanted.push(sym);
+      }
+      const CHUNK = Math.max(1, Number(process.env.JSII_TS7_BATCH_CHUNK ?? 1000));
+      for (let i = 0; i < wanted.length; i += CHUNK) {
+        const chunk = wanted.slice(i, i + CHUNK);
+        const docs: any[] = this.checker.getSymbolDocumentations(chunk);
+        for (let j = 0; j < chunk.length; j++) {
+          this._storeDocs(chunk[j], docs[j]?.tags ?? [], docs[j]?.comment ?? '');
+        }
+      }
+      return;
+    }
     const api = this.project.api;
     if (
       !process.env.JSII_TS7_BATCH ||
@@ -925,11 +970,7 @@ export class Ts7Assembler {
       }
     }
 
-    const instanceProps = this.checker.getPropertiesOfType(type);
-    const staticTypeForPrefetch = !isInterface ? this.checker.getTypeOfSymbol(sym) : undefined;
-    const staticPropsForPrefetch = staticTypeForPrefetch ? this.checker.getPropertiesOfType(staticTypeForPrefetch) : [];
-    // One RPC for all member docs of this type (instance + static).
-    this._prefetchDocs([...instanceProps, ...staticPropsForPrefetch]);
+    const staticType = !isInterface ? this.checker.getTypeOfSymbol(sym) : undefined;
 
     // Constructor parameter properties are only listed for the EFFECTIVE
     // constructor — the first constructor found on the type itself or along its
@@ -937,20 +978,89 @@ export class Ts7Assembler {
     // signature). Param-props of a non-effective erased-base constructor (e.g.
     // when the subclass declares its own constructor) are NOT re-listed.
     let effectiveCtorOwnerId: unknown;
+    let effectiveCtorOwnerSym: any;
     if (!isInterface) {
       if ((decl.members ?? []).some((m: any) => m.kind === SyntaxKind.Constructor)) {
         effectiveCtorOwnerId = sym?.id;
+        effectiveCtorOwnerSym = sym;
       } else {
         for (const eb of erasedBases) {
           const s = eb.getSymbol?.() ?? eb.symbol;
           const ebDecl = s?.declarations?.[0]?.resolve(this.project);
           if (ebDecl && (ebDecl.members ?? []).some((m: any) => m.kind === SyntaxKind.Constructor)) {
             effectiveCtorOwnerId = s.id;
+            effectiveCtorOwnerSym = s;
             break;
           }
         }
       }
     }
+
+    if (this._coarse) {
+      // Coarse path: one `getMembersOfType` round trip per side (instance /
+      // static) returns exactly the members the loops below would keep — the
+      // filter mirrors their conditions (internal, deprecated-when-stripping,
+      // private, declaring type in {own, erased bases}, effective-constructor
+      // parameter properties) — together with each member's docs and declared
+      // type. Members laziness would have skipped are never materialized.
+      const ownerSymbols = [sym];
+      for (const eb of erasedBases) {
+        const s = eb.getSymbol?.() ?? eb.symbol;
+        if (s?.id != null && erasedBaseSymIds.has(s.id)) {
+          ownerSymbols.push(s);
+        }
+      }
+      const filter = {
+        excludeInternal: true,
+        excludePrivate: true,
+        // With an allow-list, stripping is per-fqn: keep deprecated members and
+        // decide below exactly like the fine-grained path.
+        excludeDeprecated: this.stripDeprecated && !this.stripAllowList,
+        ownerSymbols,
+        includeDeclaredType: true,
+      };
+      const visit = (members: any[], isStatic: boolean): void => {
+        for (const m of members) {
+          this._storeDocs(m.symbol, m.tags, m.comment);
+          if (this._shouldStrip(m.symbol, `${jsiiType.fqn}#${m.symbol.name}`)) {
+            continue;
+          }
+          const mDecl = m.symbol.declarations?.[0]?.resolve(this.project);
+          if (!mDecl) {
+            continue;
+          }
+          if (m.isMethod) {
+            const method = this._visitMethod(m.symbol, mDecl, isStatic);
+            if (isInterface) {
+              method.abstract = true;
+            }
+            methods.push(method);
+          } else {
+            const property = this._visitProperty(m.symbol, mDecl, isStatic, m.declaredType);
+            if (isInterface) {
+              property.abstract = true;
+            }
+            props.push(property);
+          }
+        }
+      };
+      visit(this.checker.getMembersOfType(type, { ...filter, parameterPropertyOwner: effectiveCtorOwnerSym }), false);
+      if (staticType) {
+        visit(this.checker.getMembersOfType(staticType, { ...filter, excludeNames: ['prototype'] }), true);
+      }
+      if (props.length) {
+        jsiiType.properties = props.sort((a, b) => a.name.localeCompare(b.name));
+      }
+      if (methods.length) {
+        jsiiType.methods = methods.sort((a, b) => a.name.localeCompare(b.name));
+      }
+      return;
+    }
+
+    const instanceProps = this.checker.getPropertiesOfType(type);
+    const staticPropsForPrefetch = staticType ? this.checker.getPropertiesOfType(staticType) : [];
+    // One RPC for all member docs of this type (instance + static).
+    this._prefetchDocs([...instanceProps, ...staticPropsForPrefetch]);
 
     for (const p of instanceProps) {
       if (this._isInternal(p)) {
@@ -1097,9 +1207,9 @@ export class Ts7Assembler {
     return this._withDefaultDocs(m);
   }
 
-  private _visitProperty(psym: any, decl: any, isStatic: boolean): any {
+  private _visitProperty(psym: any, decl: any, isStatic: boolean, declaredType?: any): any {
     const { SyntaxKind } = this.ts7;
-    const t = this.checker.getTypeOfSymbolAtLocation(psym, decl);
+    const t = declaredType ?? this.checker.getTypeOfSymbolAtLocation(psym, decl);
     const opt: { optional?: boolean } = {};
     const p: any = {
       locationInModule: this._locationOf(decl),
