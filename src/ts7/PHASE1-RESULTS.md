@@ -1120,3 +1120,103 @@ tighter mechanism than EAGAIN retries (e.g. a native `poll`). Branch kept for
 the eventual upstream proposal; no PR/issue filed.
 
 Raw logs archived off-repo (`ts7-spin-raw-20261024.tar.gz`, `cstate/*.txt`).
+
+## Phase 5C — coarse-grained checker endpoints (closed, gate passed)
+
+Fix candidate 1 of Phase 4, limited to the two endpoints with the largest
+round-trip savings. TypeScript fork branch `api/coarse-endpoints-1792810368`
+(on top of the spin-poll branch; Go handlers + proto + generated sync/async
+clients + 3 Go tests; the api test package passes):
+
+- `getSymbolDocumentations(symbols[])` — JSDoc tags and documentation comment
+  of many symbols in one round trip, element-wise equal to `getJsDocTags` /
+  `getDocumentationComment`.
+- `getMembersOfType(type, filter)` — the properties of a type that pass the
+  filter, each with its documentation, the symbol of its declaring type and
+  (optionally) its declared type. The filter (`excludeInternal`,
+  `excludePrivate`, `excludeDeprecated`, `excludeNames`, `ownerSymbols`,
+  `parameterPropertyOwner`, `includeDeclaredType`) describes exactly the members
+  jsii's `_visitMembers` keeps, so nothing a lazy traversal would skip is
+  materialized (the Phase 2E lesson). Both run on the single API checker and
+  return the same symbol/type handles as the fine-grained methods, so id
+  identity (`typeFqnBySymbolId`) is untouched.
+
+jsii side (spike branch `spike/async-fanout-1792738229`, `dbba419`):
+feature-detected use of both endpoints in `_prefetchDocs` and `_visitMembers`;
+`JSII_TS7_COARSE=0` forces the fine-grained path for A/B runs.
+
+### Parity
+
+- constructs: identical. aws-cdk-lib fixture (20,221 types / 97,071 members):
+  identical **after one fix** — the first run leaked four ECMAScript private
+  fields of `aws_cloudwatch.Metric` (`#accountOverride`, ...): the server tested
+  "internal name starts with `_`" on the checker's internal name (`\xFE#4@#x`)
+  while the client tests the wire name (`__#4@#x`). The 0-diff gate caught the
+  divergence exactly as intended; the server now matches on
+  `ast.EscapeSymbolName` (regression test added, `5a21924`).
+- Real aws-cdk-lib (aws-cdk main, 22,706 types): identical. The
+  `cloud-assembly-schema` package no longer lives in the aws-cdk monorepo
+  (consumed from npm), so its parity gate is the Phase 2F result, not re-run.
+
+### Numbers (same fork build, c7i.4xlarge, spin-poll on unless stated)
+
+aws-cdk-lib fixture, 3 runs each:
+
+| | fine-grained | coarse | delta |
+|---|---|---|---|
+| C6 on | 35.0 / 34.3 / 34.5 → **34.5s** | 29.4 / 29.9 / 29.2 → **29.4s** | **-5.1s** |
+| C6 off (2 runs) | 32.4 / 32.0 | 26.9 / 26.9 | -5.3s |
+| C6 off, spin off | 37.9 | 29.4 | -8.5s |
+| requests / transport / sent | 698k / 8.6s / 131 MB | **304k / 5.4s / 52 MB** | -56% / -3.2s / -60% |
+
+Real aws-cdk-lib (lerna-built aws-cdk main, in place, `--strip-deprecated`,
+C6 on, 2 runs each; classic 120.8s on the same box):
+
+| | fine-grained | coarse | delta |
+|---|---|---|---|
+| spin on | 43.2 / 43.1s | **37.8 / 38.2s** | -5.2s |
+| spin off (stock-like) | 51.4s | 42.6s | -8.8s |
+| requests / transport / sent | 783k / 10.2s / 168 MB | 340k / 6.8s / 65 MB | -57% / -3.4s / -61% |
+
+The pre-fixed gate (coarse at least 5s faster than fine on the fixture) passes
+at -5.1s; it is a narrow pass because the spin-poll had already removed most of
+the per-round-trip wait the endpoints were designed to save (Phase 4 estimated
+-9 to -12s against a 13s round-trip tax; with spin that tax is ~8s).
+
+Not done, by decision: the third endpoint of the plan (type-argument / union /
+index-signature data folded into `TypeResponse`) would remove ~70k of the
+remaining 304k requests, worth ≈1.3s at the measured 18 us per request — noise
+level. What is left on the fixture after coarse: `getTypeFromTypeNode` 47k,
+`getTypeAtLocation` 46k (owner/heritage types), `getMembersOfType` 22.7k,
+`getTypeOfSymbolAtLocation` 22k (parameters), `getFullyQualifiedName` 20k,
+`getExportsOfSymbol` 20k; the next foldable group is the per-signature trio
+(`getSignatureFromDeclaration` + `getParametersOfSignature` + parameter types,
+≈50k) into one `describeSignature`, again ≈1s.
+
+### Cumulative (what each step is worth, both baselines)
+
+| step | fixture (c7i.4xlarge) | real aws-cdk-lib |
+|---|---|---|
+| classic jsii | 84.1s | 125.2s (Phase 1) / 120.8s (today) |
+| ts7 sync, stock 7.1.0-beta, C6 on | 48.7s (1.73x) | 53.8s (2.3x) |
+| ts7 sync on the fork build, spin off | 41–44s | 51.4s |
+| + spin-poll (`TSGO_SYNC_SPIN_US=100`) | 34.5s (2.4x) | 43.1s (2.8x) |
+| + coarse endpoints | **29.4s (2.9x)** | **38.0s (3.2x)** |
+
+Of the 29.4s left on the fixture: emit 5.4s, typecheck 5.3s (both single Go
+calls), source-file transfer 1.6s, ≈5s of round trips, ≈9s of Node-side
+assembler/decode/write work, the rest startup.
+
+### Proposal package for microsoft/TypeScript (not filed; for the maintainers' decision)
+
+1. Spin-poll before blocking reads on both ends of the sync channel
+   (`perf/api-sync-spin-1792807669`): -7s fixture / -8s real on a 7th-gen Intel
+   host, no protocol change, ≈0.4 core while active; open points: default budget
+   (100 us tested, 20 us equivalent in the microbenchmark), opt-in vs default,
+   Windows path.
+2. `getSymbolDocumentations` + `getMembersOfType`
+   (`api/coarse-endpoints-1792810368`): -5s on both baselines, -56% requests,
+   -60% bytes sent; checker identity preserved; tests included.
+
+Raw logs archived off-repo (`ts7-coarse-raw-20261024.tar.gz`,
+`ts7-cdklib-coarse-raw-20261024.tar.gz`).
