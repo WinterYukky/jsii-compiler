@@ -978,18 +978,15 @@ export class Ts7Assembler {
     // signature). Param-props of a non-effective erased-base constructor (e.g.
     // when the subclass declares its own constructor) are NOT re-listed.
     let effectiveCtorOwnerId: unknown;
-    let effectiveCtorOwnerSym: any;
     if (!isInterface) {
       if ((decl.members ?? []).some((m: any) => m.kind === SyntaxKind.Constructor)) {
         effectiveCtorOwnerId = sym?.id;
-        effectiveCtorOwnerSym = sym;
       } else {
         for (const eb of erasedBases) {
           const s = eb.getSymbol?.() ?? eb.symbol;
           const ebDecl = s?.declarations?.[0]?.resolve(this.project);
           if (ebDecl && (ebDecl.members ?? []).some((m: any) => m.kind === SyntaxKind.Constructor)) {
             effectiveCtorOwnerId = s.id;
-            effectiveCtorOwnerSym = s;
             break;
           }
         }
@@ -1003,25 +1000,40 @@ export class Ts7Assembler {
       // private, declaring type in {own, erased bases}, effective-constructor
       // parameter properties) — together with each member's docs and declared
       // type. Members laziness would have skipped are never materialized.
-      const ownerSymbols = [sym];
+      // jsii's member policy, spelled out with the API's neutral predicates:
+      //  - public/protected only (the fine path drops `private`; ECMAScript
+      //    private names are private too);
+      //  - no @internal and, when stripping without an allow-list, no
+      //    @deprecated (with an allow-list stripping is per-fqn: keep them and
+      //    decide below exactly like the fine path);
+      //  - no underscore-prefixed names (`prototype` on the static side);
+      //  - members declared on this type or on one of its ERASED bases (a
+      //    member declared on a named/exported base is listed by that base).
+      // Constructor parameter properties are jsii-specific (only those of the
+      // effective constructor count), so they are re-judged here on the client.
+      const erasedBaseSyms: any[] = [];
       for (const eb of erasedBases) {
         const s = eb.getSymbol?.() ?? eb.symbol;
         if (s?.id != null && erasedBaseSymIds.has(s.id)) {
-          ownerSymbols.push(s);
+          erasedBaseSyms.push(s);
         }
       }
+      const excludeJsDocTags = ['internal'];
+      if (this.stripDeprecated && !this.stripAllowList) {
+        excludeJsDocTags.push('deprecated');
+      }
       const filter = {
-        excludeInternal: true,
-        excludePrivate: true,
-        // With an allow-list, stripping is per-fqn: keep deprecated members and
-        // decide below exactly like the fine-grained path.
-        excludeDeprecated: this.stripDeprecated && !this.stripAllowList,
-        ownerSymbols,
+        visibility: ['public', 'protected'],
+        excludeJsDocTags,
+        includeInheritedFrom: { declaringTypes: erasedBaseSyms },
         includeDeclaredType: true,
       };
       const visit = (members: any[], isStatic: boolean): void => {
         for (const m of members) {
           this._storeDocs(m.symbol, m.tags, m.comment);
+          if (m.isParameterProperty && (effectiveCtorOwnerId == null || m.owner?.id !== effectiveCtorOwnerId)) {
+            continue;
+          }
           if (this._shouldStrip(m.symbol, `${jsiiType.fqn}#${m.symbol.name}`)) {
             continue;
           }
@@ -1044,9 +1056,9 @@ export class Ts7Assembler {
           }
         }
       };
-      visit(this.checker.getMembersOfType(type, { ...filter, parameterPropertyOwner: effectiveCtorOwnerSym }), false);
+      visit(this.checker.getMembersOfType(type, { ...filter, excludeNamePattern: '^_' }), false);
       if (staticType) {
-        visit(this.checker.getMembersOfType(staticType, { ...filter, excludeNames: ['prototype'] }), true);
+        visit(this.checker.getMembersOfType(staticType, { ...filter, excludeNamePattern: '^(_|prototype$)' }), true);
       }
       if (props.length) {
         jsiiType.properties = props.sort((a, b) => a.name.localeCompare(b.name));
