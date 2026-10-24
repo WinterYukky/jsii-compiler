@@ -986,3 +986,72 @@ endpoint should take the filtered member list, not materialize every member.
 
 Raw logs archived off-repo (`ts7-stepb-raw-20261023.tar.gz`,
 `ts7-batchchunk-raw-20261023.tar.gz`).
+
+## Phase 5A — the unexplained ~10s of the batch regression: CPU deep idle (C6) exit latency (closed, root cause found)
+
+Setup: TypeScript fork branch `perf/api-runtime-trace-1792804258` (upstream main
+8d9b6da + 30 lines: `TSGO_API_TRACE` records a Go execution trace with
+`ipc.read` / `ipc.handle` / `ipc.write` regions on the sync connection). Both the
+default and the batched (`JSII_TS7_BATCH=1`) jsii runs use this one fork build
+(stock 7.1.0-beta default: 45.6s, fork default: 44.4s — same within noise).
+aws-cdk-lib fixture, c7i.4xlarge, 16 vCPU.
+
+Where the server goroutine spends its time (trace, region x goroutine state):
+
+| region | default | batch | delta |
+|---|---|---|---|
+| `ipc.read` (blocked in `read`, waiting for the client's next request) | 24.3s | **27.9s** | **+3.6s** |
+| `ipc.handle` (handler; 12s of it is waiting on the parallel checker/emit goroutines) | 18.5s | 18.9s | +0.4s |
+| `ipc.write` | 3.5s | 3.2s | -0.3s |
+
+The regression lives entirely in the client turnaround, and it is a tail, not a
+shift: `ipc.read` p50 19 → 21 us, **p90 31 → 82 us, with a ~200 us plateau** on
+the type-materialising methods (`getTypeOfSymbolAtLocation` p90 33 → 193 us,
+`getTypeFromTypeNode` 24 → 204 us, `getPropertiesOfType` 128 → 202 us). Node's
+non-wait CPU is identical (14.5s vs 14.6s, cpu-prof), V8 GC is identical
+(258 vs 265 scavenges, 745 vs 726 ms of pauses; `--max-semi-space-size=64`
+changes nothing), Go GC cycles are identical (17 vs 17, STW 7 ms). So the extra
+time is spent with *both* processes off-CPU: it is wake-up latency.
+
+The quantum is the CPU's deep idle state. On this instance `intel_idle` exposes
+C6 with a **190 us exit latency** (`/sys/devices/system/cpu/cpu0/cpuidle/state3`).
+C6 entries during the run: default 267k, batch **409k**. Batch mode makes the
+gaps between consecutive requests longer (a 1000-symbol batch takes the server
+26–330 us and the client ~1 ms to parse), long enough for the menu governor to
+park the waiting CPU in C6 instead of C1E (2 us); each wake-up then costs ~190 us.
+This explains every earlier observation: the uniform ~200 us tail, the
+run-to-run variance (+4s to +20s: governor prediction history), the direction
+dependence (large *requests* lengthen the server's handling, i.e. the client's
+wait), the 1-in-100 frequency threshold, and why GOMAXPROCS / LockOSThread /
+GOGC / Node GC experiments all changed nothing.
+
+Decisive test — C6 disabled at runtime (`echo 1 > .../cpuidle/state3/disable`
+on all CPUs), same build, same box, 2 runs each:
+
+| run | C6 enabled | **C6 disabled** |
+|---|---|---|
+| ts7 default | 44.4 / 44.6s (transport 16.6s) | **40.9 / 41.1s** (transport 13.2s) |
+| ts7 batch (docs, 1000/chunk) | 49.2 / 49.5s (transport 19.4s) | **38.6 / 38.1s** (transport 9.9s) |
+
+With C6 off the "regression" inverts: batching is **2.7s faster than default**,
+i.e. the request-count saving (698k → 486k) finally shows up in wall-clock. The
+Phase 2E / 3B conclusion "batching is slower on the official API" was a C-state
+artifact, not a property of the API. Real aws-cdk-lib (×1.13 ratio from the
+fixture, not measured): default ≈ -4s, batch ≈ -12s.
+
+Fix candidates (ranked), all compatible with the single API checker:
+
+1. **Spin-poll before blocking in the sync channel, both sides** (TS: Node
+   `syncChannel` + Go `conn_sync`): poll the pipe non-blocking for up to ~100 us
+   before parking. Keeps the waiting CPU in C1E; costs one otherwise-idle core.
+   Expected: the "C6 disabled" numbers above (fixture default -3.6s, batch -11s)
+   without touching the host. Small change; measurable with the fork build.
+2. **Build-host configuration** (operational, no code): `intel_idle.max_cstate=1`
+   or `cpu_dma_latency` on CI runners. Same gain, zero code, but outside jsii's
+   control.
+3. Re-enable E1-style docs batching in jsii once (1) or (2) is in place: it is a
+   -2.7s win, not a loss.
+
+Raw logs archived off-repo (`ts7-trace-raw-20261024.tar.gz`,
+`ts7-trace-cstate-raw-20261024.tar.gz`); the trace summariser is
+`perf/tracereg` on the spike branch.
