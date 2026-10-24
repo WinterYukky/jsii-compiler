@@ -1055,3 +1055,68 @@ Fix candidates (ranked), all compatible with the single API checker:
 Raw logs archived off-repo (`ts7-trace-raw-20261024.tar.gz`,
 `ts7-trace-cstate-raw-20261024.tar.gz`); the trace summariser is
 `perf/tracereg` on the spike branch.
+
+## Phase 5B — spike: spin-poll before blocking reads on the sync channel (closed, success)
+
+Fix candidate 1 from Phase 5A, implemented on the TypeScript fork branch
+`perf/api-sync-spin-1792807669` (on top of the trace branch, +~90 lines):
+`TSGO_SYNC_SPIN_US=<us>` (default off) makes both ends of the sync channel poll
+the pipe for up to that budget before parking — Go side wraps stdin in a
+`poll(2)`-with-zero-timeout loop (`ipc.NewSpinReadCloser`, unix only), Node side
+switches the read fd to non-blocking and retries `readSync` on EAGAIN until the
+deadline, then takes one blocking read. No protocol change, no checker change.
+
+Same fork build, same c7i.4xlarge, aws-cdk-lib fixture, 2 runs per cell:
+
+| cell | ts7 default | ts7 batch (docs) | transport default / batch |
+|---|---|---|---|
+| C6 on, spin 0 (today's status quo) | 41.8 / 41.0s | 48.2 / 46.5s | 14.9s / 20.2s |
+| C6 on, **spin 100us** | **34.8 / 34.6s** | **34.6 / 34.9s** | 8.6s / 7.9s |
+| C6 off, spin 0 | 38.2 / 38.3s | 35.5 / 35.4s | 12.7s / 9.6s |
+| C6 off, spin 100us | **32.0 / 32.4s** | **31.5 / 31.5s** | 7.3s / 5.9s |
+
+- Spin-poll alone (C6 on) beats disabling C6 outright: -7s on default, -12s on
+  batch; the batch-mode regression disappears (batch == default within noise).
+  So the spin is doing more than keeping the core out of C6: it also removes the
+  futex/pipe wake-up (two `read`-blocked context switches per round trip) when
+  the reply arrives within the budget, which is the common case (~20 us).
+- No double-fix penalty: with C6 already off, spin still gives another -6s, and
+  nothing regresses.
+- `.jsii` identical across cells (parity gate).
+- CPU cost, measured 25s into the run via `/proc/<pid>/stat`: node 6.3 → 11.9s,
+  tsgo 21.2 → 25.4s (default). About +0.2 core per process, i.e. roughly 0.4
+  of one otherwise idle core — not a full core, because each side only spins
+  while the other is working.
+- Echo microbenchmark: the small-echo floor rises 7.8 → 9.0 us (the extra
+  `poll` syscall), but the 1-big-every-30 penalty disappears (p90 17.4 → 10.5 us).
+  The spin trades ~1 us per round trip for immunity to the idle-state tail.
+
+C-state exposure survey (Ubuntu 24.04, kernel 7.0.0-1014-aws, `cpuidle` sysfs),
+one line each, to scope the environment dependence:
+
+| instance | driver | deepest state exposed |
+|---|---|---|
+| c7i / m7i (Sapphire Rapids) | intel_idle | **C6, 190 us exit latency** |
+| m8i (Granite Rapids) | intel_idle | C6 170 us, **C6P 210 us** |
+| c5, c6i, c6a, c7g | none | no idle driver: the guest has no deep idle states (HLT only) |
+
+So the tail only exists on 7th/8th-generation Intel Nitro instances (and
+presumably bare metal); on older Intel, AMD and Graviton instances the status
+quo already behaves like "C6 off". The build host of a CDK release is unknown,
+hence the environment dependence must be stated with any number quoted from
+c7i. With spin-poll on, the host no longer matters (no deep idle entry during
+the compile, and the pipe wake-up is skipped on every host).
+
+Cumulative on the fork build (fixture): classic ≈ 84s → ts7 sync 41s (2.0x) →
+ts7 + spin 34.7s (2.4x) → ts7 + spin + docs batching 34.7s (no further gain:
+with the wake-up gone, the 212k saved round trips are worth only ~0.1s). Real
+aws-cdk-lib, by fixture ratio (not measured): 53.8s → ≈ 44s with spin.
+
+Open questions for a TypeScript-side change (not resolved here): the right
+default budget (100 us was the only value tested at scale; 20 us gave the same
+floor in the microbenchmark), whether to enable by default or opt in, a Windows
+equivalent (named pipes have no `poll`), and whether the Node side should use a
+tighter mechanism than EAGAIN retries (e.g. a native `poll`). Branch kept for
+the eventual upstream proposal; no PR/issue filed.
+
+Raw logs archived off-repo (`ts7-spin-raw-20261024.tar.gz`, `cstate/*.txt`).
