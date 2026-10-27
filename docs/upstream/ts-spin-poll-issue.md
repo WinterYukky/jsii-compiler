@@ -20,7 +20,7 @@ First, the server's own work per request is small, and the server's wait for the
 
 Second, the plateau matches the host's deep idle state. The host exposes C6 (a deep CPU idle state; ~190 µs to exit), and the number of C6 entries during a run tracks the size of the tail. Disabling C6 at runtime, same build, same box, removes the plateau and takes the benchmark from 44.5 s to 41.0 s. The same effect is visible with the `echo` method alone: back-to-back small echoes take 8 µs each, but interleaving one large request every 30 small ones raises the small-echo mean by 70%, because the server's longer handling time for the large request leaves the client's CPU idle long enough to enter C6.
 
-Third, whether C6 exists at all depends on the host. On Ubuntu 24.04, c7i and m7i expose C6 at 190 µs, m8i exposes C6 at 170 µs and C6P at 210 µs, while c5, c6i, c6a and c7g (Graviton) expose no deep idle state to the guest and do not show the tail. Users of the API rarely control the idle-state configuration of the machine they build on (CI runners in particular), so I think the communication layer is the right place to absorb this rather than a host tuning recommendation.
+Third, whether C6 exists at all depends on the host. On Ubuntu 24.04, c7i and m7i expose C6 at 190 µs, m8i exposes C6 at 170 µs and C6P at 210 µs, while c5, c6i, c6a and c7g (Graviton) expose no deep idle state to the guest and do not show the tail. I also ran the benchmark on a c7g.4xlarge (Graviton, no idle driver at all): the proposal still helps there (60.6 → 55.3 s, see Results) because the client and the server still skip the pipe wake-up whenever the reply arrives within the budget, but the gain is smaller than on c7i, which is consistent with the idle-state exit being the larger of the two costs on x86. Users of the API rarely control the idle-state configuration of the machine they build on (CI runners in particular), so I think the communication layer is the right place to absorb this rather than a host tuning recommendation.
 
 ## Proposal
 
@@ -39,6 +39,8 @@ aws-cdk-lib benchmark: 41.8 / 41.0 s without the change → 34.8 / 34.6 s with a
 CPU cost, measured from `/proc/<pid>/stat` during the run: the Node client goes from 14 to 18 CPU-seconds and the Go server from 56 to 58 over a 37 s run, i.e. about +0.2 cores per process. The client only checks while the server is working and the server only checks while the client is working, so the cost stays well below one core.
 
 Smaller hosts, to check that the client and the server competing for cores does not invert the result: on 4 vCPU the benchmark improves by 1.9 s (39.1/38.6 → 37.3/37.2 s), pinned to 2 CPUs by 1.0 s (41.9/41.4 → 40.8/40.9 s). The gain shrinks with fewer cores but I did not find a configuration where it reversed.
+
+A host without a deep idle state (c7g.4xlarge, Graviton, arm64 build of the same fork): 60.5 / 60.7 s without the change → 55.2 / 55.3 s with a 100 µs budget → 55.6 / 56.8 s adaptive, CPU +3 s on the client and +18 s on the server over the run (about +0.3 core on the server, the per-iteration cost of the checking is higher on this platform). The benchmark is slower on Graviton overall for reasons unrelated to this proposal.
 
 ## Other things I tried
 

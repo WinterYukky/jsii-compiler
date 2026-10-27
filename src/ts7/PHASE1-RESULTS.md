@@ -1316,3 +1316,34 @@ before the PR).
 Raw logs archived off-repo (`ts7-5d-4vcpu-raw-20261024.tar.gz`,
 `ts7-5d-pin2cpu-raw-20261024.tar.gz`, `ts7-5d-2vcpu-raw-20261024.tar.gz` — the
 last one is the OOM evidence only).
+
+## Phase 5E — spin-poll on Graviton (no deep idle state exposed)
+
+Question: on a host without a C6-class idle state, does the spin-poll still
+help (by skipping the pipe wake-up), or is it pure overhead? c7g.4xlarge
+(16 vCPU Graviton3, Ubuntu 24.04 arm64), fork branch
+`api/coarse-endpoints-generic-filter-1792824451` built from source on the box,
+aws-cdk-lib fixture, two runs per cell, `.jsii` identical across cells.
+`cpuidle` sysfs: no idle driver at all (`current_driver=none`), i.e. the
+guest has no deep idle state to enter.
+
+| path | spin off | spin 100 µs | adaptive | CPU-s node / tsgo (off → spin) |
+|---|---|---|---|---|
+| fine-grained | 60.5 / 60.7 s | **55.2 / 55.3 s** | 55.6 / 56.8 s | 34 / 60 → 37 / 78 |
+| coarse endpoints | 46.1 s | **44.7 s** | — | 22 / 56 → 26 / 66 |
+
+Transport overhead (fine): 16.9 s → 14.6 s. Echo floor (median, 100 B):
+17.1 µs without spin, 18.5 µs with spin (Graviton's floor is about 2x the x86
+floor of 8 µs either way).
+
+Reading: without a deep idle state the gain is smaller than on c7i (-5.3 s vs
+-7 s on the fine path, -1.4 s vs -5 s on the coarse path) but still present
+and never inverted; what remains is the pipe wake-up (two context switches per
+round trip) that the spin skips when the reply arrives within the budget. The
+CPU cost is higher here than on x86 (tsgo +18 CPU-s over a 55 s run, about
++0.3 core) because the Go side's poll loop is more expensive per iteration on
+this platform; the adaptive variant costs the same as the fixed budget on this
+dense workload, as expected. Graviton is also simply slower for this workload
+(fine 60.5 s vs 41.8 s on c7i).
+
+Raw logs archived off-repo (`ts7-5e-graviton-raw-20261027.tar.gz`).
