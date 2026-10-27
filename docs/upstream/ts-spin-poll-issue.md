@@ -4,13 +4,34 @@
 
 I am an independent contributor experimenting with running jsii (the AWS CDK's multi-language binding generator) on the TypeScript 7 programmatic API; this is something I noticed along the way, and I think it may be useful beyond jsii. I would be glad to adjust the approach or the details to whatever fits the project.
 
-## Summary
+## 🔍 Search Terms
+
+sync api round trip latency, typescript/sync idle wake-up, api server spin poll, batchRequests slower, out-of-process api performance, cpu idle state exit latency, tsgo api channel
+
+## ✅ Viability Checklist
+
+- [x] This wouldn't be a breaking change in existing TypeScript/JavaScript code
+- [x] This wouldn't change the runtime behavior of existing JavaScript code
+- [x] This could be implemented without emitting different JS based on the types of the expressions
+- [x] This isn't a runtime feature (e.g. library functionality, non-ECMAScript syntax with JavaScript output, new syntax sugar for JS, etc.)
+- [x] This isn't a request to add a new utility type
+- [x] This feature would agree with the rest of our Design Goals: https://github.com/Microsoft/TypeScript/wiki/TypeScript-Design-Goals
+
+(The change is to how the `--api` server and the `typescript/sync` client wait for each other on the transport; it touches no language feature, no emit and no type.)
+
+## ⭐ Suggestion
 
 The sync API exchanges one message per query. While the server handles a request, the client blocks waiting for the reply; while the client prepares its next request, the server blocks waiting for it. On many current hosts, the CPU of whichever process is blocked enters a deep idle state between messages, and leaving that state costs up to 190 µs, which is more than the server spends answering a typical query (a few µs). A tool that walks a whole program issues a very large number of such queries (jsii issues about 700k per aws-cdk-lib compile), and the idle-state exit cost adds up to 15–20% of its wall clock.
 
 The change I am proposing is small: when either the client or the server is waiting for the next message from the other, it keeps checking for the message itself for a very short time (up to 100 µs) before handing the wait to the OS and blocking. Replies usually arrive within 20 µs, so in the common case neither process blocks and the idle-state exit cost disappears entirely. On a current aws-cdk-lib checkout built from source, a jsii compile goes from 51 s to 43 s for about +0.4 CPU cores while it runs. The protocol and the API surface are unchanged.
 
-## What I observed
+When either the client or the server is waiting for the next message from the other, it keeps checking for the message's arrival itself for a very short budget (I used 100 µs) before handing the wait to the OS and blocking. On the server this is a thin wrapper around the connection's input; on the client it is a bounded retry loop in the sync channel's read path. No message format, handler or client-facing type changes; the implementation is on the fork branches above.
+
+A fixed budget wastes CPU when traffic is sparse (see "Other things I tried"), so the fork also has an adaptive variant: the checking is suspended after three consecutive waits longer than 1 ms and resumed after three consecutive waits shorter than 1 ms. The 1 ms threshold is deliberately far above the budget: on a C6 host a blocked `read` returns after ~200 µs even when the other process answered at once, so "the budget ran out" alone would switch the checking off exactly where it helps.
+
+I think the adaptive variant with a 100 µs budget is a reasonable default, with an environment variable to turn it off, but the default, the budget and whether it should be opt-in are decisions I would rather leave to you; the fork exposes `TSGO_SYNC_SPIN_US` and `TSGO_SYNC_SPIN_ADAPTIVE` so the options can be compared directly.
+
+## 📃 Motivating Example
 
 I added `runtime/trace` regions around the server's read, handle and write steps on the sync connection (fork branch `perf/api-runtime-trace-1792804258`) and ran jsii's TypeScript 7 backend over the aws-cdk-lib snapshot that jsii-compiler uses for its benchmark (~20k types, ~700k API requests per compile; "the aws-cdk-lib benchmark" below). The host was a c7i.4xlarge (16 vCPU, Sapphire Rapids, Ubuntu 24.04).
 
@@ -21,16 +42,6 @@ First, the server's own work per request is small, and the server's wait for the
 Second, the plateau matches the host's deep idle state. The host exposes C6 (a deep CPU idle state; ~190 µs to exit), and the number of C6 entries during a run tracks the size of the tail. Disabling C6 at runtime, same build, same box, removes the plateau and takes the benchmark from 44.5 s to 41.0 s. The same effect is visible with the `echo` method alone: back-to-back small echoes take 8 µs each, but interleaving one large request every 30 small ones raises the small-echo mean by 70%, because the server's longer handling time for the large request leaves the client's CPU idle long enough to enter C6.
 
 Third, whether C6 exists at all depends on the host. On Ubuntu 24.04, c7i and m7i expose C6 at 190 µs, m8i exposes C6 at 170 µs and C6P at 210 µs, while c5, c6i, c6a and c7g (Graviton) expose no deep idle state to the guest and do not show the tail. I also ran the benchmark on a c7g.4xlarge (Graviton, no idle driver at all): the proposal still helps there (60.6 → 55.3 s, see Results) because the client and the server still skip the pipe wake-up whenever the reply arrives within the budget, but the gain is smaller than on c7i, which is consistent with the idle-state exit being the larger of the two costs on x86. Users of the API rarely control the idle-state configuration of the machine they build on (CI runners in particular), so I think the communication layer is the right place to absorb this rather than a host tuning recommendation.
-
-## Proposal
-
-When either the client or the server is waiting for the next message from the other, it keeps checking for the message's arrival itself for a very short budget (I used 100 µs) before handing the wait to the OS and blocking. On the server this is a thin wrapper around the connection's input; on the client it is a bounded retry loop in the sync channel's read path. No message format, handler or client-facing type changes; the implementation is on the fork branches above.
-
-A fixed budget wastes CPU when traffic is sparse (see "Other things I tried"), so the fork also has an adaptive variant: the checking is suspended after three consecutive waits longer than 1 ms and resumed after three consecutive waits shorter than 1 ms. The 1 ms threshold is deliberately far above the budget: on a C6 host a blocked `read` returns after ~200 µs even when the other process answered at once, so "the budget ran out" alone would switch the checking off exactly where it helps.
-
-I think the adaptive variant with a 100 µs budget is a reasonable default, with an environment variable to turn it off, but the default, the budget and whether it should be opt-in are decisions I would rather leave to you; the fork exposes `TSGO_SYNC_SPIN_US` and `TSGO_SYNC_SPIN_ADAPTIVE` so the options can be compared directly.
-
-## Results
 
 All numbers are from the same fork build, two runs per cell, with the generated `.jsii` output byte-identical across cells.
 
@@ -44,17 +55,22 @@ All numbers are from the same fork build, two runs per cell, with the generated 
 
 CPU cost is measured from `/proc/<pid>/stat` during the run (on the c7i.4xlarge benchmark the Node client goes from 14 to 18 CPU-seconds and the Go server from 56 to 58 over a 37 s run); the client only checks while the server is working and the server only checks while the client is working, so the cost stays well below one core. The 4 vCPU and 2 CPU rows use the coarse-endpoint traversal proposed separately, so their baseline is not directly comparable with the first row; they are there to check that the client and the server competing for cores does not invert the result, and it does not. The Graviton benchmark is slower overall for reasons unrelated to this proposal; the per-iteration cost of the checking is also higher on that platform.
 
-## Other things I tried
-
 Disabling C6 on the host. I expected it to remove the whole tail and therefore match the proposal. It helped less: -3.5 s on the benchmark against -7 s for the checking, and the two combined gave -6 s over the C6-off baseline. The difference is that the checking also skips the pipe wake-up itself, two context switches per round trip, whenever the reply arrives within the budget, which disabling an idle state cannot do; the two are complementary rather than redundant.
 
+Sparse traffic is where a fixed budget costs something. I measured a client that sends a request only every 10 ms, and requests that take the server several milliseconds each. I expected the checking to be wasted there, and it is: the waiting process (the server in the first case, the client in the second) spends the full 100 µs checking before it blocks, and no reply or request arrives in that window. In the worst case I constructed (50 fast requests followed by one slow one, repeated 40 times) the server's CPU time goes from 0.03 s to 0.46 s with a fixed budget. The adaptive variant notices the long waits, suspends the checking, and lands at 0.04 s, while keeping the dense-traffic result within noise. The absolute amounts are small; the adaptive variant exists to bring the cost close to zero for workloads that do not benefit.
+
+
+## 💻 Use Cases
+
+**1. What do you want to use this for?** Tools that walk a whole program through the API: jsii (multi-language bindings for the AWS CDK), documentation generators, API extractors. For every exported type they ask the checker for its members, each member's type, declaring type and JSDoc; jsii issues about 700k such requests for one aws-cdk-lib compile.
+
+**2. What shortcomings exist with current approaches?** The cost of leaving a deep idle state after each round trip (up to 190 µs on current Intel hosts) exceeds the server's handling time for a typical request (a few µs), and reducing the number of round trips with `batchRequests` makes the compile slower rather than faster:
+
 Before looking at the channel I tried the obvious lever, fewer requests. The API already offers `batchRequests`, so I bundled jsii's documentation reads (`getJsDocTags` and `getDocumentationComment`, about 250k of the 700k requests) into requests of up to 1000 symbols each, which cut the total request count by about 30%. I expected a proportional saving of a few seconds.
-
 Instead the compile got slower, 42 s to 49 s on the benchmark, and the slowdown varied a lot between runs (anywhere from +4 s to +20 s). Server time was unchanged and the Node client's CPU was unchanged; the extra time was pure waiting, and it was spread over the requests that were not batched: ordinary single `getTypeAtLocation` calls that normally take 26 µs took 60 µs on average in the batched runs. A request count that goes down while every remaining request gets slower did not fit any explanation on the API side, and I could not reproduce the size of the effect with GC settings, Go scheduler settings or smaller batch sizes.
-
 The execution trace resolved it: a 1000-symbol batch keeps the server busy for 30–300 µs instead of 3 µs, which is long enough for the client's CPU to enter C6 while the client waits, and the client then pays the 190 µs exit on that reply and on the next few; the same happens to the server's CPU while the client parses the large response. The batching API was doing exactly what it should; the idle-state tail it triggered cost more than the round trips it saved. With the checking enabled the two variants are equal (34.7 s each) and with C6 disabled the batched variant is the faster one, which is the result I had originally expected.
 
-Sparse traffic is where a fixed budget costs something. I measured a client that sends a request only every 10 ms, and requests that take the server several milliseconds each. I expected the checking to be wasted there, and it is: the waiting process (the server in the first case, the client in the second) spends the full 100 µs checking before it blocks, and no reply or request arrives in that window. In the worst case I constructed (50 fast requests followed by one slow one, repeated 40 times) the server's CPU time goes from 0.03 s to 0.46 s with a fixed budget. The adaptive variant notices the long waits, suspends the checking, and lands at 0.04 s, while keeping the dense-traffic result within noise. The absolute amounts are small; the adaptive variant exists to bring the cost close to zero for workloads that do not benefit.
+**3. What workarounds are you using in the meantime?** None that a tool can apply itself. The host's idle-state configuration is outside the control of the API's users (CI runners in particular), and jsii keeps issuing per-symbol requests, so the 15–20% stays in its wall clock.
 
 ## What I have not verified
 
@@ -65,3 +81,4 @@ The fork's Windows build is a no-op (the named-pipe transport would need its own
 Build the fork branch (`npx hereby build && npx hereby build:api`), point the sync client at it, and compare `TSGO_SYNC_SPIN_US=0` against `TSGO_SYNC_SPIN_US=100` (optionally with `TSGO_SYNC_SPIN_ADAPTIVE=1`) on any traversal that issues many small checker requests; `api.getTimingInfo()` reports round-trip and server time per run. The host's idle states can be listed with `cat /sys/devices/system/cpu/cpu0/cpuidle/state*/latency` and a state can be disabled with the `disable` knob in the same directory to confirm the dependence.
 
 If a different approach to the same problem fits the project better, or if there are concerns about the client and the server checking for messages in the channel at all, I am happy to rework this.
+
