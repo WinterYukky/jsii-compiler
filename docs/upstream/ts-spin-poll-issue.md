@@ -49,11 +49,11 @@ All numbers are from the same fork build, two runs per cell, with the generated 
 |---|---|---|---|---|
 | c7i.4xlarge, aws-cdk-lib benchmark | 41.8 / 41.0 s | 34.8 / 34.6 s | 34.6 / 34.9 s | about +0.2 core per process |
 | c7i.4xlarge, current aws-cdk-lib built from source | 51.4 s | 43.1 s | — | — |
-| 4 vCPU (c7i.xlarge) | 39.1 / 38.6 s | 37.3 / 37.2 s | 37.5 / 37.3 s | — |
-| 2 CPUs (pinned on the same 4 vCPU host) | 41.9 / 41.4 s | 40.8 / 40.9 s | 41.2 / 40.5 s | — |
+| 4 vCPU (c7i.xlarge) | 49.0 / 48.5 s | 44.3 / 45.0 s | 44.1 / 45.1 s | about +0.1 core on the client, +0.2 on the server |
+| 2 CPUs (pinned on the same 4 vCPU host) | 51.1 / 51.9 s | 48.6 / 48.9 s | 48.5 / 48.8 s | about +0.1 core on the client, +0.15 on the server |
 | c7g.4xlarge (Graviton, no deep idle state) | 60.5 / 60.7 s | 55.2 / 55.3 s | 55.6 / 56.8 s | about +0.3 core on the server |
 
-CPU cost is measured from `/proc/<pid>/stat` during the run (on the c7i.4xlarge benchmark the Node client goes from 14 to 18 CPU-seconds and the Go server from 56 to 58 over a 37 s run); the client only checks while the server is working and the server only checks while the client is working, so the cost stays well below one core. The 4 vCPU and 2 CPU rows use the coarse-endpoint traversal proposed separately, so their baseline is not directly comparable with the first row; they are there to check that the client and the server competing for cores does not invert the result, and it does not. The Graviton benchmark is slower overall for reasons unrelated to this proposal; the per-iteration cost of the checking is also higher on that platform.
+CPU cost is measured from `/proc/<pid>/stat` during the run (on the c7i.4xlarge benchmark the Node client goes from 14 to 18 CPU-seconds and the Go server from 56 to 58 over a 37 s run); the client only checks while the server is working and the server only checks while the client is working, so the cost stays well below one core. The 4 vCPU and 2 CPU rows check that the client and the server competing for cores does not invert the result; it does not, though the gain shrinks with fewer cores. The Graviton benchmark is slower overall for reasons unrelated to this proposal; the per-iteration cost of the checking is also higher on that platform.
 
 Disabling C6 on the host. I expected it to remove the whole tail and therefore match the proposal. It helped less: -3.5 s on the benchmark against -7 s for the checking, and the two combined gave -6 s over the C6-off baseline. The difference is that the checking also skips the pipe wake-up itself, two context switches per round trip, whenever the reply arrives within the budget, which disabling an idle state cannot do; the two are complementary rather than redundant.
 

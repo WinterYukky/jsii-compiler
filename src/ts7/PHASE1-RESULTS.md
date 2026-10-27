@@ -1347,3 +1347,19 @@ dense workload, as expected. Graviton is also simply slower for this workload
 (fine 60.5 s vs 41.8 s on c7i).
 
 Raw logs archived off-repo (`ts7-5e-graviton-raw-20261027.tar.gz`).
+
+### Phase 5D addendum — fine-grained traversal on 4 vCPU and 2 CPUs
+
+The 4 vCPU / 2 CPU cells above used the coarse-endpoint traversal; re-measured
+with the fine-grained (default) traversal so the rows are comparable with the
+c7i.4xlarge benchmark row. c7i.xlarge, same fork build, two runs per cell,
+`.jsii` identical across cells, CPU seconds node / tsgo:
+
+| host | spin off | spin 100 µs | adaptive |
+|---|---|---|---|
+| 4 vCPU | 49.0 / 48.5 s (20 / 60) | **44.3 / 45.0 s** (25 / 69) | 44.1 / 45.1 s (26 / 67) |
+| 2 CPUs (`taskset -c 0,1`) | 51.1 / 51.9 s (18 / 45) | **48.6 / 48.9 s** (24 / 53) | 48.5 / 48.8 s (24 / 53) |
+
+Gain -4.2 s on 4 vCPU and -2.8 s on 2 CPUs (vs -7 s on 16 vCPU), never
+inverted; adaptive equals the fixed budget on this dense workload. Raw logs
+archived off-repo (`ts7-5d-fine-4vcpu-2cpu-raw-20261027.tar.gz`).
