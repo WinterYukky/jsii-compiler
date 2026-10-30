@@ -1363,3 +1363,65 @@ c7i.4xlarge benchmark row. c7i.xlarge, same fork build, two runs per cell,
 Gain -4.2 s on 4 vCPU and -2.8 s on 2 CPUs (vs -7 s on 16 vCPU), never
 inverted; adaptive equals the fixed budget on this dense workload. Raw logs
 archived off-repo (`ts7-5d-fine-4vcpu-2cpu-raw-20261027.tar.gz`).
+
+## Phase 5F — PR branch under a cgroup CPU quota (closed)
+
+Question left open in 5D: in a container with a CPU quota, does the spin turn
+into cgroup throttling and lose its gain? Also the first full-repo check of the
+clean PR branch. Branch `WinterYukky/TypeScript` `perf/api-sync-spin-poll`
+(one feature commit `0c9d249` on upstream `main` `0b0aeb3`, plus two test-only
+lint fixups → `ca0c4a5`): spin + adaptive **on by default** (100 µs,
+`TSGO_SYNC_SPIN_US=0` off, `TSGO_SYNC_SPIN_ADAPTIVE=0` fixed), no trace, no
+coarse endpoints; the server wrap moved from `api/server.go` to
+`cmd/tsc/api.go` because upstream's wasip1 PR made `options.In` a non-file
+reader there (the wrapper only engages on readers that expose `Fd()`).
+
+Host c7i.4xlarge (16 vCPU, C6 190 µs exposed), Ubuntu 24.04, cgroup v2, fork
+built from source on the box, aws-cdk-lib fixture, fine-grained traversal
+(`JSII_TS7_COARSE=0`), **one run per cell**, `.jsii` identical across all five
+cells. The quota cells run client + server together in one
+`systemd-run --scope -p CPUQuota=200%` scope (2 CPUs of time per 100 ms period,
+any of the 16 cores); throttling counters are the scope's `cpu.stat`.
+
+| cell | wall | CPU-s node / tsgo | nr_throttled / throttled time | transport |
+|---|---|---|---|---|
+| no quota, spin off | 41.8 s | 15.9 / 47.8 | — | 15.8 s |
+| no quota, default (adaptive) | **33.5 s** | 20.1 / 51.5 | — | 8.5 s |
+| quota 200 %, spin off | 47.2 s | 16.6 / 40.8 | 34 / 0.53 s | 14.7 s |
+| quota 200 %, default (adaptive) | **42.3 s** | 21.2 / 46.6 | 115 / 5.22 s | 9.7 s |
+| quota 200 %, fixed spin | 41.5 s | 20.3 / 46.2 | 87 / 2.29 s | 9.2 s |
+
+Reading (measured): under the quota the spin does raise throttling — the scope
+is throttled in 115 of ~420 periods and loses 5.2 s of CPU time to the cap,
+against 0.5 s without spin — but the wall clock still improves by 5 s (−10 %;
+−8.3 s / −20 % without the quota), and the transport overhead drops from 14.7
+to 9.7 s. Average demand stays under the cap in both cells (1.22 vs 1.60 cores),
+so the throttling comes from bursts (GC on either side plus both processes
+spinning) that exceed 2 cores within a period; each throttled period costs the
+pair the rest of that 100 ms slice, which is where the throttled time goes.
+Inferred, not measured: the gain under a quota is smaller than unconstrained
+mainly because the throttled slices are pure wait, and it would shrink further
+at a tighter quota (100 % would leave no headroom for the second process at
+all). The quota result sits between the 16 vCPU and the 2-CPU-pinned result of
+5D (−2.8 s): a quota caps time, pinning also forces the two processes to share
+cores. Fixed vs adaptive differ by 0.8 s wall and by a factor 2 in throttled
+time in this single run; that is within what one run can resolve and is not
+read as a difference.
+
+Repo checks on the branch (same box): `npx hereby test:tsc` rc=0 (164 s on
+`0c9d249`), `npx hereby check:format` rc=0. `npx hereby test:api` failed on the
+first pass for an environment reason — the bootstrap installed Node 22, whose
+type stripping rejects `using`/`await using` in the test sources (CI uses
+`lts/*` = Node 24); with Node 24 it passes (rc=0). `npx hereby lint` found 8
+issues in the new test file (`errcheck` ×4, `paralleltest` ×3, `tparallel` ×1;
+fixed in `99b0f87`), then 4 (`mirror`: `(*os.File).WriteString`; fixed in
+`ca0c4a5`), then rc=0. Cross-compiles of `internal/ipc` + `cmd/tsc` for
+windows, wasip1/wasm, darwin, freebsd pass on the worker; `go test -race` of the
+new tests passes.
+
+Conclusion: no case measured so far gets slower with the default on, including a
+2-CPU cgroup quota; the quota turns part of the spin into throttled time but
+not enough to cancel the gain. Raw logs archived off-repo
+(`ts7-5f-pr-branch-quota-raw-20261030.tar.gz`,
+`ts7-5f-pr-branch-checks-node24-20261030.tar.gz`). PR body draft:
+`docs/upstream/ts-spin-poll-pr-body.md`.
