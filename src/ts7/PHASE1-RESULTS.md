@@ -1425,3 +1425,107 @@ not enough to cancel the gain. Raw logs archived off-repo
 (`ts7-5f-pr-branch-quota-raw-20261030.tar.gz`,
 `ts7-5f-pr-branch-checks-node24-20261030.tar.gz`). PR body draft:
 `docs/upstream/ts-spin-poll-pr-body.md`.
+
+
+## Phase 3B — strict whole-assembly parity on the preview/v7.1 branch (closed)
+
+Branch: `WinterYukky/jsii-compiler:feat/ts7-backend-preview-1793929812` at `54bf754`
+(TypeScript 7 programmatic API as the only backend, on top of `aws/jsii-compiler:preview/v7.1` = `c50a54c`).
+
+Method: field-by-field diff of the whole `.jsii` JSON (every type, member, doc field,
+submodule, metadata), not the type-space comparison script used in Phase 1/2. Excluded
+fields: `jsiiVersion`, `fingerprint`, `locationInModule`, `metadata.tscOutDir`,
+`metadata.jsii.compiledWithDeprecationWarnings` (feature B not in scope). Reference
+assemblies were built from the same sources with the classic compiler
+(constructs: jsii 6.0.18; cloud-assembly-schema: 5.7.5; jsii-calc fixtures: 6.0.20 from
+npm; aws-cdk-lib: the real `lerna run build --scope=aws-cdk-lib` artifact of
+aws/aws-cdk `main` `42913b76` with the monorepo's jsii 6.0.20, on a c7i.4xlarge).
+
+| Package | Result |
+|---|---|
+| constructs (12 types) | identical; emit file set, every `.d.ts`, rtti identical |
+| @aws-cdk/cloud-assembly-schema (59 types) | identical except 1 field of category (a) |
+| jsii-calc fixtures (4 packages, 297 types in jsii-calc) | 3 packages identical; jsii-calc: 3 fields of category (a) |
+| aws-cdk-lib from source (23,131 types) | 60 leaf fields: 6 of (a), 54 of (b), **0 other** |
+
+Progression on aws-cdk-lib across the loop (all pushed): `01286b8` 29,957 diffs →
+`2c5b1eb` 5,163 → `2fbba8b` 152 (union order 0 after classification fix) → `e8de6f3`
+421 (363 (a) / 54 (b) / 4 other) → `a4aed42` 61 (6 / 54 / 1) → `54bf754` 60 (6 / 54 / 0).
+
+Divergences found and fixed by this loop (beyond Phase 2F): `namespace` on submodule
+types and nested submodule registration; dependency attribution by resolved directory
+(symlinked packages, `exports` maps); `rootDir` inference on TS5011 for generated
+tsconfigs (+ entry point + `metadata.tscRootDir`); inherited initializer (base type /
+erased base constructor, docs from the constructor symbol); `implements` order and
+erased-interface heritage; docs inheritance through interfaces (comment only, tags not
+inherited, as TS6 did), 2+ levels deep, and through the class for parameter properties
+(+ `@param` combination); verbatim tag values; `@see` leading space rule; `@enum {T}`
+type expression dropped; `{@link}` rendering per classic `buildLinkParts`
+(resolved vs unresolved names, `#member`, bare member names of the enclosing type,
+`url | text`); union constituent order by declaration rank; strip: empty member lists
+kept, interface list re-sorted when a stripped type is replaced, strip check after the
+ownership check.
+
+### Exclusion (a): union constituent order, identical set — 6 fields in aws-cdk-lib
+
+The classic assembler emitted the constituents in the checker's order = TS6 internal
+type id (creation) order, which is not observable through the TS7 API. The declaration
+rank heuristic (primitives, arrays of primitives, named types by program file order and
+position, other collections) reproduces it everywhere else. Union constituent order is
+carried into generated bindings by pacmak, so these can change member order in generated
+code (stated as a fact, not dismissed).
+
+```
+CfnResource.methods[obtainDependencies].returns.type.collection.elementtype.union.types
+aws_cloudwatch_actions.LambdaAction.initializer.parameters[lambdaFunction].type.union.types
+aws_mediatailor.CfnPlaybackConfiguration.properties[configurationAliases].type.union.types
+aws_mediatailor.CfnPlaybackConfigurationProps.properties[configurationAliases].type.union.types
+aws_sam.CfnFunction.EventSourceProperty.properties[properties].type.union.types
+aws_sam.CfnStateMachine.EventSourceProperty.properties[properties].type.union.types
+```
+Other packages: `cloud-assembly-schema.MetadataEntry.data`; `jsii-calc.AllTypes.unionProperty`;
+`jsii-calc.ClassWithNestedUnion.unionProperty` (property + initializer parameter).
+
+### Exclusion (b): TS6 JSDoc parser tag misparse — 54 fields on 27 members in aws-cdk-lib
+
+TS6 treats `@.` (in "symbols: _ . : / = + - @.") and `@aws-cdk/aws-s3tables-alpha`
+mid-sentence as a tag start: remarks are cut and the tail lands in `docs.custom[""]` /
+`docs.custom["aws-cdk"]`. TS7 keeps the text. The classic output is the broken one.
+Each member differs in `docs.remarks` and `docs.custom` (2 fields):
+
+```
+aws_cleanroomsml.CfnTrainingDatasetProps.properties[tags]
+aws_ecs.CfnCapacityProviderProps.properties[tags]
+aws_ecs.CfnClusterProps.properties[tags]
+aws_ecs.CfnServiceProps.properties[tags]
+aws_ecs.CfnTaskDefinitionProps.properties[tags]
+aws_ecs.CfnTaskSetProps.properties[tags]
+aws_eks.CfnPodIdentityAssociationProps.properties[tags]
+aws_eks_v2.CfnPodIdentityAssociationProps.properties[tags]
+aws_lightsail.CfnDatabaseProps.properties[masterUserPassword]
+aws_location.CfnGeofenceCollectionProps.properties[tags]
+aws_location.CfnMapProps.properties[tags]
+aws_managedblockchain.CfnMember.MemberFabricConfigurationProperty.properties[adminPassword]
+aws_opsworkscm.CfnServerProps.properties[tags]
+aws_qbusiness.CfnApplicationProps.properties[tags]
+aws_qbusiness.CfnDataSourceProps.properties[tags]
+aws_qbusiness.CfnIndexProps.properties[tags]
+aws_qbusiness.CfnPluginProps.properties[tags]
+aws_qbusiness.CfnRetrieverProps.properties[tags]
+aws_qbusiness.CfnWebExperienceProps.properties[tags]
+aws_s3tables.CfnNamespace  (docs.remarks + docs.custom.aws-cdk)
+aws_s3tables.CfnTable
+aws_s3tables.CfnTableBucket
+aws_s3tables.CfnTableBucketPolicy
+aws_s3tables.CfnTablePolicy
+aws_secretsmanager.CfnSecretProps.properties[tags]
+aws_stepfunctions.CfnActivityProps.properties[tags]
+aws_stepfunctions.CfnStateMachineProps.properties[tags]
+```
+
+Full machine-readable list with ref/gen values: `docs/upstream/strict-exclusions-aws-cdk-lib-54bf754.json`
+(also `s3://alphaface-compile-transfer-tmp/lege-tsgo-poc/strict/strict-exclusions-54bf754.json`,
+with `ref-cdk.json` / `gen-cdk-54bf754.json` next to it).
+
+Wall-clock of the TS7 compiler on aws-cdk-lib during the loop: 57.5 / 61.3 / 60.7 / 60.9 / 63.1 / 63.4 s
+(c7i.4xlarge, type check + emit, `--strip-deprecated --compress-assembly`).

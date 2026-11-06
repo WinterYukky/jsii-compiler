@@ -1,7 +1,7 @@
 # Draft PR body — aws/jsii-compiler: compile with the TypeScript 7 programmatic API (follow-up to the preview/v7.1 dependency bump)
 
 > Paste-ready body for the PR from `WinterYukky/jsii-compiler:feat/ts7-backend-preview-1793929812` to `aws/jsii-compiler:preview/v7.1`.
-> Head at the time of writing: `01286b8` (four commits on top of `c50a54c`). Reference the dependency-bump PR by URL, not by number. Paragraphs are single lines for clean GitHub rendering.
+> Head at the time of writing: `54bf754` (nine commits on top of `c50a54c`). Reference the dependency-bump PR by URL, not by number. Paragraphs are single lines for clean GitHub rendering.
 > Suggested title: `feat: compile with the TypeScript 7 programmatic API`
 
 ---
@@ -24,21 +24,29 @@ The result builds (`npx projen compile` reports 0 errors), produces assemblies i
 
 **Modified.** `src/compiler.ts` keeps the tsconfig generation/validation and project-reference discovery and delegates compilation to `ts7Emit` (+91/−354). `src/jsii-diagnostic.ts`, `src/utils.ts`, `src/warnings.ts`, `src/project-info.ts` and `src/tsconfig/*` are retyped from `ts.*` to the compiler's own types; tsconfig handling works on the JSON form end to end, with the case-insensitive option values and `lib` names normalized the way the classic parser did implicitly. `src/common/symbol-id.ts` keeps `symbolIdentifier` with structural parameter types (see "Breaking").
 
-Net against `preview/v7.1`: 62 files, +3,998/−8,675.
+Net against `preview/v7.1`: 62 files, +4,451/−8,675.
 
 ## Parity
 
-I compared the `.jsii` produced by this branch against the one produced by the published classic compiler for the same sources.
+I compared the `.jsii` produced by this branch against the one produced by the classic compiler for the same sources, field by field over the whole assembly. Four fields are excluded because they legitimately differ between any two builds or compiler versions: `jsiiVersion`, `fingerprint`, `locationInModule` (positions in the TypeScript 7 declarations differ by a few lines for some nodes) and `metadata.tscOutDir` (recorded by jsii 6.x and this branch, not by 5.7.5). `metadata.jsii.compiledWithDeprecationWarnings` is also excluded for aws-cdk-lib, since `--add-deprecation-warnings` is not part of this change.
 
 | Package | Classic reference | Result |
 |---|---|---|
-| `constructs` (12 types, 53 members) | jsii 6.0.18 | Whole assembly identical apart from `jsiiVersion`, `fingerprint` and `locationInModule`. Emitted `.js`/`.d.ts` file set identical, every `.d.ts` byte-identical, runtime type info (`Symbol.for('jsii.rtti')`) identical. |
-| `@aws-cdk/cloud-assembly-schema` (59 types, 213 members) | jsii 5.7.5 | Whole assembly identical apart from the same three fields and `metadata.tscOutDir`, which jsii 5.7.5 did not record yet (6.x does, and so does this branch). |
-| `aws-cdk-lib` (22,682 types, 110,232 members) | jsii 5.x, during the earlier experiment | 0 type and member differences with the type-space comparison used at the time. That comparison normalized union member order and ignored `overrides`, both of which this PR now produces like the classic compiler; I recommend re-running it strictly before merging and can do so on request. |
+| `constructs` (12 types, 53 members) | jsii 6.0.18, built from source | Identical. Emitted `.js`/`.d.ts` file set identical, every `.d.ts` byte-identical, runtime type info (`Symbol.for('jsii.rtti')`) identical. |
+| `@aws-cdk/cloud-assembly-schema` (59 types, 213 members) | jsii 5.7.5, built from source | Identical except one field in category (a) below. |
+| jsii-calc fixtures of this repository (`@scope/jsii-calc-base-of-base`, `@scope/jsii-calc-base`, `@scope/jsii-calc-lib`, `jsii-calc`: 297 types, 728 members in `jsii-calc` alone) | jsii 6.0.20 from npm | Three packages identical; `jsii-calc` identical except three fields in category (a). |
+| `aws-cdk-lib` from source (aws/aws-cdk `main` at `42913b76`, 23,131 types, built with `--strip-deprecated --compress-assembly` as `lerna run build` does) | jsii 6.0.20 as pinned by the monorepo, the actual `lerna run build` artifact | 60 differing leaf fields out of the whole assembly, all in the two categories below; 0 others. |
 
-Along the way the comparison surfaced, and this PR fixes, five divergences the earlier experiment had not: member ordering (classic `_sortMembers`: static, immutable, required, name), the documentation tags `@stable`/`@experimental`/`@subclassable`/`@defaultValue`/`@return` and custom tags, `overrides` and `usedFeatures` (previously produced by the validator's inheritance pass; its data-producing half is ported), the resolution of types that live in a dependency's submodule (previously emitted as `any`; now resolved through the dependency's recorded `symbolId`s, like the classic `symbolIdentifier` lookup), and submodule `.jsiirc.json` targets / READMEs / namespace-conflict warnings.
+The two remaining categories, with the complete field lists in [`strict-exclusions-aws-cdk-lib-54bf754.json`](strict-exclusions-aws-cdk-lib-54bf754.json):
 
-Compile time for these two packages is well under a second of server time; the earlier experiment measured `aws-cdk-lib` at about 54 s wall-clock on this path against about 106 s for the classic compiler on the same machine.
+| Category | aws-cdk-lib | Other packages | What it is |
+|---|---|---|---|
+| (a) Order of the constituents of a union type; the set of constituents is identical | 6 fields (`CfnResource.obtainDependencies` return element type, `aws_cloudwatch_actions.LambdaAction` initializer parameter `lambdaFunction`, `aws_mediatailor.CfnPlaybackConfiguration[Props].configurationAliases`, `aws_sam.CfnFunction.EventSourceProperty.properties`, `aws_sam.CfnStateMachine.EventSourceProperty.properties`) | `cloud-assembly-schema.MetadataEntry.data`; `jsii-calc.AllTypes.unionProperty`, `jsii-calc.ClassWithNestedUnion.unionProperty` (property and initializer parameter) | The classic compiler emitted the constituents in the checker's order, which is the order of the checker's internal type ids (creation order). That order is not observable through the TypeScript 7 API. This branch orders constituents by declaration (intrinsic primitives, then arrays of primitives, then named types by program file order and position, then other collections), which reproduces the classic order everywhere else in these packages. The order of union constituents is carried into the generated bindings by jsii-pacmak, so these fields can change the member order in generated code. |
+| (b) `@`-prefixed words inside documentation text | 54 fields on 27 members (`tags` properties of 20 L1 `*Props` structs, `masterUserPassword`/`adminPassword` of two L1 structs, and the five `aws_s3tables` L1 classes) | none | The TypeScript 6 JSDoc parser used by the classic compiler treats `@.` (in "`... symbols: _ . : / = + - @.`") and `@aws-cdk/aws-s3tables-alpha` in the middle of a sentence as the start of a tag: the remarks are cut off there and the rest ends up in `docs.custom` under the key `""` or `aws-cdk`. The TypeScript 7 parser keeps the text as text. The classic output is the broken one here. |
+
+Along the way the comparison surfaced, and this PR fixes, these divergences the earlier type-space comparison had not shown: member ordering (classic `_sortMembers`: static, immutable, required, name); the documentation tags `@stable`/`@experimental`/`@subclassable`/`@defaultValue`/`@return`/`@see`/`@enum` and custom tags, with tag values kept verbatim; `{@link ...}` references in documentation text (the TypeScript 7 checker renders them as plain text, the classic language service kept the braces, with a trailing space for unresolved names); documentation inherited by undocumented members from base classes and implemented interfaces, and by parameter properties from the constructor's `@param`; `overrides` and `usedFeatures` (previously produced by the validator's inheritance pass; its data-producing half is ported); `namespace` on types in submodules and the registration of nested submodules; the initializer of a class without its own constructor (the base type's, or an erased base class's); the ordering of `implements` and the erasure of non-exported interfaces; the resolution of types that live in a dependency's submodule or behind a symlinked package (previously emitted as `any`); submodule `.jsiirc.json` targets / READMEs / namespace-conflict warnings; `metadata.tscRootDir` inferred from the sources when `rootDir` is not configured (TypeScript 7 no longer infers it, TS5011); and the details of `--strip-deprecated` on the assembly (empty member lists kept, interface list re-sorted when a stripped type is replaced).
+
+Compile time for the three small packages is well under a second of server time. `aws-cdk-lib` compiles in 60 to 63 s wall-clock on a c7i.4xlarge (4 runs during this comparison, type check and emit included); the earlier experiment measured about 54 s on this path against about 106 s for the classic compiler on a c7i.8xlarge.
 
 ## Not in this PR
 
@@ -50,7 +58,7 @@ These three areas are intentionally left out so the compiler becomes usable on `
 | B. `--add-deprecation-warnings` (generation of `.warnings.jsii.js` and the call injection) | Fails with an explicit error. | 29 (`deprecation-warnings` 28, `integration` 1) | Second follow-up; the generator needs a TypeScript 7 replacement for the transformer-based injection. |
 | C. `--strip-deprecated` on the emitted `.js`/`.d.ts` | The assembly is stripped (members, types, allow-list honoured); the emitted JavaScript and declarations still contain the deprecated members. | 3 (`deprecated-remover`) | Third follow-up, together with B, since both are emit-side transforms. |
 
-Two smaller differences I am aware of and did not address: when `rootDir` is not configured the classic compiler inferred `metadata.tscRootDir` from the common prefix of the source files, this branch omits it; and the `symbolIdentifier`-based resolution of foreign types needs the dependency's assembly to carry `symbolId`s (assemblies without them fall back to matching top-level type names, as before).
+One smaller difference I am aware of and did not address: the `symbolIdentifier`-based resolution of foreign types needs the dependency's assembly to carry `symbolId`s (assemblies without them fall back to matching top-level type names, as before).
 
 ## Breaking
 
@@ -70,6 +78,6 @@ Neither is introduced by this PR; both come from tooling that `require('typescri
 
 ## Tests
 
-`npx projen compile`: 0 errors (from 936 on the branch). `npx jest --ci`: 30 of 32 suites run, 257 tests pass, 168 are skipped with `TODO(ts7)` comments as itemised above, 0 fail. `tsc -p test/tsconfig.json --noEmit` passes. The parity comparison above is scripted (`scripts/ts7-compare-jsii.mjs` plus a strict whole-assembly diff) and was run against freshly built classic reference assemblies.
+`npx projen compile`: 0 errors (from 936 on the branch). `npx jest --ci`: 30 of 32 suites run, 257 tests pass, 168 are skipped with `TODO(ts7)` comments as itemised above, 0 fail. `tsc -p test/tsconfig.json --noEmit` passes. The parity comparison above is a field-by-field diff of the whole assembly JSON (not the type-space comparison script of the earlier experiment) against classic reference assemblies built from the same sources.
 
 I used an AI assistant (Claude, through an agent) as a tool for the port, the comparisons and the drafting; the scope, the design decisions and the review of every change are mine.

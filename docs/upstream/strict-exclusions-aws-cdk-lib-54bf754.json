@@ -1,0 +1,365 @@
+{
+ "head": "54bf754",
+ "refTypes": 23131,
+ "totalDiffs": 60,
+ "unionOrderOnly": {
+  "count": 6,
+  "fields": [
+   ".types.aws-cdk-lib.CfnResource.methods[obtainDependencies].returns.type.collection.elementtype.union.types",
+   ".types.aws-cdk-lib.aws_cloudwatch_actions.LambdaAction.initializer.parameters[lambdaFunction].type.union.types",
+   ".types.aws-cdk-lib.aws_mediatailor.CfnPlaybackConfiguration.properties[configurationAliases].type.union.types",
+   ".types.aws-cdk-lib.aws_mediatailor.CfnPlaybackConfigurationProps.properties[configurationAliases].type.union.types",
+   ".types.aws-cdk-lib.aws_sam.CfnFunction.EventSourceProperty.properties[properties].type.union.types",
+   ".types.aws-cdk-lib.aws_sam.CfnStateMachine.EventSourceProperty.properties[properties].type.union.types"
+  ]
+ },
+ "ts6JsDocParserQuirk": {
+  "count": 54,
+  "fields": [
+   ".types.aws-cdk-lib.aws_cleanroomsml.CfnTrainingDatasetProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_cleanroomsml.CfnTrainingDatasetProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_ecs.CfnCapacityProviderProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_ecs.CfnCapacityProviderProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_ecs.CfnClusterProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_ecs.CfnClusterProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_ecs.CfnServiceProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_ecs.CfnServiceProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_ecs.CfnTaskDefinitionProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_ecs.CfnTaskDefinitionProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_ecs.CfnTaskSetProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_ecs.CfnTaskSetProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_eks.CfnPodIdentityAssociationProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_eks.CfnPodIdentityAssociationProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_eks_v2.CfnPodIdentityAssociationProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_eks_v2.CfnPodIdentityAssociationProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_lightsail.CfnDatabaseProps.properties[masterUserPassword].docs.custom",
+   ".types.aws-cdk-lib.aws_lightsail.CfnDatabaseProps.properties[masterUserPassword].docs.remarks",
+   ".types.aws-cdk-lib.aws_location.CfnGeofenceCollectionProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_location.CfnGeofenceCollectionProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_location.CfnMapProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_location.CfnMapProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_managedblockchain.CfnMember.MemberFabricConfigurationProperty.properties[adminPassword].docs.custom",
+   ".types.aws-cdk-lib.aws_managedblockchain.CfnMember.MemberFabricConfigurationProperty.properties[adminPassword].docs.remarks",
+   ".types.aws-cdk-lib.aws_opsworkscm.CfnServerProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_opsworkscm.CfnServerProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_qbusiness.CfnApplicationProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_qbusiness.CfnApplicationProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_qbusiness.CfnDataSourceProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_qbusiness.CfnDataSourceProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_qbusiness.CfnIndexProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_qbusiness.CfnIndexProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_qbusiness.CfnPluginProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_qbusiness.CfnPluginProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_qbusiness.CfnRetrieverProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_qbusiness.CfnRetrieverProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_qbusiness.CfnWebExperienceProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_qbusiness.CfnWebExperienceProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_s3tables.CfnNamespace.docs.custom.aws-cdk",
+   ".types.aws-cdk-lib.aws_s3tables.CfnNamespace.docs.remarks",
+   ".types.aws-cdk-lib.aws_s3tables.CfnTable.docs.custom.aws-cdk",
+   ".types.aws-cdk-lib.aws_s3tables.CfnTable.docs.remarks",
+   ".types.aws-cdk-lib.aws_s3tables.CfnTableBucket.docs.custom.aws-cdk",
+   ".types.aws-cdk-lib.aws_s3tables.CfnTableBucket.docs.remarks",
+   ".types.aws-cdk-lib.aws_s3tables.CfnTableBucketPolicy.docs.custom.aws-cdk",
+   ".types.aws-cdk-lib.aws_s3tables.CfnTableBucketPolicy.docs.remarks",
+   ".types.aws-cdk-lib.aws_s3tables.CfnTablePolicy.docs.custom.aws-cdk",
+   ".types.aws-cdk-lib.aws_s3tables.CfnTablePolicy.docs.remarks",
+   ".types.aws-cdk-lib.aws_secretsmanager.CfnSecretProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_secretsmanager.CfnSecretProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_stepfunctions.CfnActivityProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_stepfunctions.CfnActivityProps.properties[tags].docs.remarks",
+   ".types.aws-cdk-lib.aws_stepfunctions.CfnStateMachineProps.properties[tags].docs.custom",
+   ".types.aws-cdk-lib.aws_stepfunctions.CfnStateMachineProps.properties[tags].docs.remarks"
+  ],
+  "details": [
+   {
+    "path": ".types.aws-cdk-lib.aws_cleanroomsml.CfnTrainingDatasetProps.properties[tags].docs.custom",
+    "ref": {
+     "": ".\n- Tag keys and values are case sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for keys as it is reserved. You cannot edit or delete tag keys with this prefix. Values can have this prefix. If a tag value has `aws` as its prefix but the key does not, then Clean Rooms ML considers it to be a user tag and will count against the limit of 50 tags. Tags with only the key prefix of `aws` do not count against your tags per resource limit."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_cleanroomsml.CfnTrainingDatasetProps.properties[tags].docs.remarks",
+    "ref": "Each tag consists of a key and an optional value, both of which you define.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource - 50.\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length - 128 Unicode characters in UTF-8.\n- Maximum value length - 256 Unicode characters in UTF-8.\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : /",
+    "gen": "Each tag consists of a key and an optional value, both of which you define.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource - 50.\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length - 128 Unicode characters in UTF-8.\n- Maximum value length - 256 Unicode characters in UTF-8.\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : / @.\n- Tag keys and values are case sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for keys as it is reserved. You cannot edit or delete tag keys with this prefix. Values can have this prefix. If a tag value has `aws` as its prefix but the key does not, then Clean Rooms ML considers it to be a user tag and will count against the limit of 50 tags. Tags with only the key prefix of `aws` do not count against your tags per resource limit."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_ecs.CfnCapacityProviderProps.properties[tags].docs.custom",
+    "ref": {
+     "": ".\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_ecs.CfnCapacityProviderProps.properties[tags].docs.remarks",
+    "ref": "Each tag consists of a key and an optional value. You define both.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource - 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length - 128 Unicode characters in UTF-8\n- Maximum value length - 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : /",
+    "gen": "Each tag consists of a key and an optional value. You define both.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource - 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length - 128 Unicode characters in UTF-8\n- Maximum value length - 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : / @.\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_ecs.CfnClusterProps.properties[tags].docs.custom",
+    "ref": {
+     "": ".\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_ecs.CfnClusterProps.properties[tags].docs.remarks",
+    "ref": "Each tag consists of a key and an optional value. You define both.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource - 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length - 128 Unicode characters in UTF-8\n- Maximum value length - 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : /",
+    "gen": "Each tag consists of a key and an optional value. You define both.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource - 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length - 128 Unicode characters in UTF-8\n- Maximum value length - 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : / @.\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_ecs.CfnServiceProps.properties[tags].docs.custom",
+    "ref": {
+     "": ".\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_ecs.CfnServiceProps.properties[tags].docs.remarks",
+    "ref": "Each tag consists of a key and an optional value, both of which you define. When a service is deleted, the tags are deleted as well.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource - 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length - 128 Unicode characters in UTF-8\n- Maximum value length - 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : /",
+    "gen": "Each tag consists of a key and an optional value, both of which you define. When a service is deleted, the tags are deleted as well.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource - 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length - 128 Unicode characters in UTF-8\n- Maximum value length - 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : / @.\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_ecs.CfnTaskDefinitionProps.properties[tags].docs.custom",
+    "ref": {
+     "": ".\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_ecs.CfnTaskDefinitionProps.properties[tags].docs.remarks",
+    "ref": "Each tag consists of a key and an optional value. You define both of them.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource - 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length - 128 Unicode characters in UTF-8\n- Maximum value length - 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : /",
+    "gen": "Each tag consists of a key and an optional value. You define both of them.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource - 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length - 128 Unicode characters in UTF-8\n- Maximum value length - 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : / @.\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_ecs.CfnTaskSetProps.properties[tags].docs.custom",
+    "ref": {
+     "": ".\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_ecs.CfnTaskSetProps.properties[tags].docs.remarks",
+    "ref": "Each tag consists of a key and an optional value. You define both.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource - 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length - 128 Unicode characters in UTF-8\n- Maximum value length - 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : /",
+    "gen": "Each tag consists of a key and an optional value. You define both.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource - 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length - 128 Unicode characters in UTF-8\n- Maximum value length - 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : / @.\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_eks.CfnPodIdentityAssociationProps.properties[tags].docs.custom",
+    "ref": {
+     "": ".\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_eks.CfnPodIdentityAssociationProps.properties[tags].docs.remarks",
+    "ref": "Each tag consists of a key and an optional value. You define both. Tags don't propagate to any other cluster or AWS resources.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource – 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length – 128 Unicode characters in UTF-8\n- Maximum value length – 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : /",
+    "gen": "Each tag consists of a key and an optional value. You define both. Tags don't propagate to any other cluster or AWS resources.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource – 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length – 128 Unicode characters in UTF-8\n- Maximum value length – 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : / @.\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_eks_v2.CfnPodIdentityAssociationProps.properties[tags].docs.custom",
+    "ref": {
+     "": ".\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_eks_v2.CfnPodIdentityAssociationProps.properties[tags].docs.remarks",
+    "ref": "Each tag consists of a key and an optional value. You define both. Tags don't propagate to any other cluster or AWS resources.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource – 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length – 128 Unicode characters in UTF-8\n- Maximum value length – 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : /",
+    "gen": "Each tag consists of a key and an optional value. You define both. Tags don't propagate to any other cluster or AWS resources.\n\nThe following basic restrictions apply to tags:\n\n- Maximum number of tags per resource – 50\n- For each resource, each tag key must be unique, and each tag key can have only one value.\n- Maximum key length – 128 Unicode characters in UTF-8\n- Maximum value length – 256 Unicode characters in UTF-8\n- If your tagging schema is used across multiple services and resources, remember that other services may have restrictions on allowed characters. Generally allowed characters are: letters, numbers, and spaces representable in UTF-8, and the following characters: + - = . _ : / @.\n- Tag keys and values are case-sensitive.\n- Do not use `aws:` , `AWS:` , or any upper or lowercase combination of such as a prefix for either keys or values as it is reserved for AWS use. You cannot edit or delete tag keys or values with this prefix. Tags with this prefix do not count against your tags per resource limit."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_lightsail.CfnDatabaseProps.properties[masterUserPassword].docs.custom",
+    "ref": {
+     "": ". It cannot contain spaces.\n\n> The `MasterUserPassword` and `RotateMasterUserPassword` parameters cannot be used together in the same template.\n\n*MySQL*\n\nConstraints: Must contain 8-41 characters.\n\n*PostgreSQL*\n\nConstraints: Must contain 8-128 characters."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_lightsail.CfnDatabaseProps.properties[masterUserPassword].docs.remarks",
+    "ref": "The password can include any printable ASCII character except the following: /, \", or",
+    "gen": "The password can include any printable ASCII character except the following: /, \", or @. It cannot contain spaces.\n\n> The `MasterUserPassword` and `RotateMasterUserPassword` parameters cannot be used together in the same template.\n\n*MySQL*\n\nConstraints: Must contain 8-41 characters.\n\n*PostgreSQL*\n\nConstraints: Must contain 8-128 characters."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_location.CfnGeofenceCollectionProps.properties[tags].docs.custom",
+    "ref": {
+     "": ".\n- Cannot use \"aws:\" as a prefix for a key."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_location.CfnGeofenceCollectionProps.properties[tags].docs.remarks",
+    "ref": "A tag is a key-value pair helps manage, identify, search, and filter your resources by labelling them.\n\nFormat: `\"key\" : \"value\"`\n\nRestrictions:\n\n- Maximum 50 tags per resource\n- Each resource tag must be unique with a maximum of one value.\n- Maximum key length: 128 Unicode characters in UTF-8\n- Maximum value length: 256 Unicode characters in UTF-8\n- Can use alphanumeric characters (A–Z, a–z, 0–9), and the following characters: + - = . _ : /",
+    "gen": "A tag is a key-value pair helps manage, identify, search, and filter your resources by labelling them.\n\nFormat: `\"key\" : \"value\"`\n\nRestrictions:\n\n- Maximum 50 tags per resource\n- Each resource tag must be unique with a maximum of one value.\n- Maximum key length: 128 Unicode characters in UTF-8\n- Maximum value length: 256 Unicode characters in UTF-8\n- Can use alphanumeric characters (A–Z, a–z, 0–9), and the following characters: + - = . _ : / @.\n- Cannot use \"aws:\" as a prefix for a key."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_location.CfnMapProps.properties[tags].docs.custom",
+    "ref": {
+     "": ".\n- Cannot use \"aws:\" as a prefix for a key."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_location.CfnMapProps.properties[tags].docs.remarks",
+    "ref": "A tag is a key-value pair helps manage, identify, search, and filter your resources by labelling them.\n\nFormat: `\"key\" : \"value\"`\n\nRestrictions:\n\n- Maximum 50 tags per resource\n- Each resource tag must be unique with a maximum of one value.\n- Maximum key length: 128 Unicode characters in UTF-8\n- Maximum value length: 256 Unicode characters in UTF-8\n- Can use alphanumeric characters (A–Z, a–z, 0–9), and the following characters: + - = . _ : /",
+    "gen": "A tag is a key-value pair helps manage, identify, search, and filter your resources by labelling them.\n\nFormat: `\"key\" : \"value\"`\n\nRestrictions:\n\n- Maximum 50 tags per resource\n- Each resource tag must be unique with a maximum of one value.\n- Maximum key length: 128 Unicode characters in UTF-8\n- Maximum value length: 256 Unicode characters in UTF-8\n- Can use alphanumeric characters (A–Z, a–z, 0–9), and the following characters: + - = . _ : / @.\n- Cannot use \"aws:\" as a prefix for a key."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_managedblockchain.CfnMember.MemberFabricConfigurationProperty.properties[adminPassword].docs.custom",
+    "ref": {
+     "": ", or a space."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_managedblockchain.CfnMember.MemberFabricConfigurationProperty.properties[adminPassword].docs.remarks",
+    "ref": "The `AdminPassword` must be at least 8 characters long and no more than 32 characters. It must contain at least one uppercase letter, one lowercase letter, and one digit. It cannot have a single quotation mark (‘), a double quotation marks (“), a forward slash(/), a backward slash(\\),",
+    "gen": "The `AdminPassword` must be at least 8 characters long and no more than 32 characters. It must contain at least one uppercase letter, one lowercase letter, and one digit. It cannot have a single quotation mark (‘), a double quotation marks (“), a forward slash(/), a backward slash(\\), @, or a space."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_opsworkscm.CfnServerProps.properties[tags].docs.custom",
+    "ref": {
+     "": "`\n- The value can be a maximum 255 characters, and contain only Unicode letters, numbers, or separators, or the following special characters: `+ - = . _ : / @`\n- Leading and trailing spaces are trimmed from both the key and value.\n- A maximum of 50 user-applied tags is allowed for any AWS OpsWorks CM server."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_opsworkscm.CfnServerProps.properties[tags].docs.remarks",
+    "ref": "- The key cannot be empty.\n- The key can be a maximum of 127 characters, and can contain only Unicode letters, numbers, or separators, or the following special characters: `+ - = . _ : /",
+    "gen": "- The key cannot be empty.\n- The key can be a maximum of 127 characters, and can contain only Unicode letters, numbers, or separators, or the following special characters: `+ - = . _ : / @`\n- The value can be a maximum 255 characters, and contain only Unicode letters, numbers, or separators, or the following special characters: `+ - = . _ : / @`\n- Leading and trailing spaces are trimmed from both the key and value.\n- A maximum of 50 user-applied tags is allowed for any AWS OpsWorks CM server."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_qbusiness.CfnApplicationProps.properties[tags].docs.custom",
+    "ref": {
+     "": "."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_qbusiness.CfnApplicationProps.properties[tags].docs.remarks",
+    "ref": "You can also use tags to help control access to the application. Tag keys and values can consist of Unicode letters, digits, white space, and any of the following symbols: _ . : / = + -",
+    "gen": "You can also use tags to help control access to the application. Tag keys and values can consist of Unicode letters, digits, white space, and any of the following symbols: _ . : / = + - @."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_qbusiness.CfnDataSourceProps.properties[tags].docs.custom",
+    "ref": {
+     "": "."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_qbusiness.CfnDataSourceProps.properties[tags].docs.remarks",
+    "ref": "You can also use tags to help control access to the data source connector. Tag keys and values can consist of Unicode letters, digits, white space, and any of the following symbols: _ . : / = + -",
+    "gen": "You can also use tags to help control access to the data source connector. Tag keys and values can consist of Unicode letters, digits, white space, and any of the following symbols: _ . : / = + - @."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_qbusiness.CfnIndexProps.properties[tags].docs.custom",
+    "ref": {
+     "": "."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_qbusiness.CfnIndexProps.properties[tags].docs.remarks",
+    "ref": "You can also use tags to help control access to the index. Tag keys and values can consist of Unicode letters, digits, white space, and any of the following symbols: _ . : / = + -",
+    "gen": "You can also use tags to help control access to the index. Tag keys and values can consist of Unicode letters, digits, white space, and any of the following symbols: _ . : / = + - @."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_qbusiness.CfnPluginProps.properties[tags].docs.custom",
+    "ref": {
+     "": "."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_qbusiness.CfnPluginProps.properties[tags].docs.remarks",
+    "ref": "You can also use tags to help control access to the data source connector. Tag keys and values can consist of Unicode letters, digits, white space, and any of the following symbols: _ . : / = + -",
+    "gen": "You can also use tags to help control access to the data source connector. Tag keys and values can consist of Unicode letters, digits, white space, and any of the following symbols: _ . : / = + - @."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_qbusiness.CfnRetrieverProps.properties[tags].docs.custom",
+    "ref": {
+     "": "."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_qbusiness.CfnRetrieverProps.properties[tags].docs.remarks",
+    "ref": "You can also use tags to help control access to the retriever. Tag keys and values can consist of Unicode letters, digits, white space, and any of the following symbols: _ . : / = + -",
+    "gen": "You can also use tags to help control access to the retriever. Tag keys and values can consist of Unicode letters, digits, white space, and any of the following symbols: _ . : / = + - @."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_qbusiness.CfnWebExperienceProps.properties[tags].docs.custom",
+    "ref": {
+     "": "."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_qbusiness.CfnWebExperienceProps.properties[tags].docs.remarks",
+    "ref": "You can also use tags to help control access to the web experience. Tag keys and values can consist of Unicode letters, digits, white space, and any of the following symbols: _ . : / = + -",
+    "gen": "You can also use tags to help control access to the web experience. Tag keys and values can consist of Unicode letters, digits, white space, and any of the following symbols: _ . : / = + - @."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_s3tables.CfnNamespace.docs.custom.aws-cdk",
+    "ref": "/aws-s3tables-alpha`\n- Yarn: `yarn add @aws-cdk/aws-s3tables-alpha`"
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_s3tables.CfnNamespace.docs.remarks",
+    "ref": "A namespace is a logical grouping of tables within your table bucket, which you can use to organize tables. For more information, see [Create a namespace](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-namespace-create.html) in the *Amazon Simple Storage Service User Guide* .\n\n- **Permissions** - You must have the `s3tables:CreateNamespace` permission to use this operation.\n- **Cloud Development Kit** - To use S3 Tables AWS CDK constructs, add the `@aws-cdk/aws-s3tables-alpha` dependency with one of the following options:\n\n- NPM: `npm i",
+    "gen": "A namespace is a logical grouping of tables within your table bucket, which you can use to organize tables. For more information, see [Create a namespace](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-namespace-create.html) in the *Amazon Simple Storage Service User Guide* .\n\n- **Permissions** - You must have the `s3tables:CreateNamespace` permission to use this operation.\n- **Cloud Development Kit** - To use S3 Tables AWS CDK constructs, add the `@aws-cdk/aws-s3tables-alpha` dependency with one of the following options:\n\n- NPM: `npm i @aws-cdk/aws-s3tables-alpha`\n- Yarn: `yarn add @aws-cdk/aws-s3tables-alpha`"
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_s3tables.CfnTable.docs.custom.aws-cdk",
+    "ref": "/aws-s3tables-alpha`\n- Yarn: `yarn add @aws-cdk/aws-s3tables-alpha`"
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_s3tables.CfnTable.docs.remarks",
+    "ref": "For more information, see [Creating an Amazon S3 table](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-create.html) in the *Amazon Simple Storage Service User Guide* .\n\n- **Permissions** - - You must have the `s3tables:CreateTable` permission to use this operation.\n- If you use this operation with the optional `metadata` request parameter you must have the `s3tables:PutTableData` permission.\n- If you use this operation with the optional `encryptionConfiguration` request parameter you must have the `s3tables:PutTableEncryption` permission.\n\n> Additionally, If you choose SSE-KMS encryption you must grant the S3 Tables maintenance principal access to your KMS key. For more information, see [Permissions requirements for S3 Tables SSE-KMS encryption](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-kms-permissions.html) .\n- **Cloud Development Kit** - To use S3 Tables AWS CDK constructs, add the `@aws-cdk/aws-s3tables-alpha` dependency with one of the following options:\n\n- NPM: `npm i",
+    "gen": "For more information, see [Creating an Amazon S3 table](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-create.html) in the *Amazon Simple Storage Service User Guide* .\n\n- **Permissions** - - You must have the `s3tables:CreateTable` permission to use this operation.\n- If you use this operation with the optional `metadata` request parameter you must have the `s3tables:PutTableData` permission.\n- If you use this operation with the optional `encryptionConfiguration` request parameter you must have the `s3tables:PutTableEncryption` permission.\n\n> Additionally, If you choose SSE-KMS encryption you must grant the S3 Tables maintenance principal access to your KMS key. For more information, see [Permissions requirements for S3 Tables SSE-KMS encryption](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-kms-permissions.html) .\n- **Cloud Development Kit** - To use S3 Tables AWS CDK constructs, add the `@aws-cdk/aws-s3tables-alpha` dependency with one of the following options:\n\n- NPM: `npm i @aws-cdk/aws-s3tables-alpha`\n- Yarn: `yarn add @aws-cdk/aws-s3tables-alpha`"
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_s3tables.CfnTableBucket.docs.custom.aws-cdk",
+    "ref": "/aws-s3tables-alpha`\n- Yarn: `yarn add @aws-cdk/aws-s3tables-alpha`"
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_s3tables.CfnTableBucket.docs.remarks",
+    "ref": "For more information, see [Creating a table bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-buckets-create.html) in the *Amazon Simple Storage Service User Guide* .\n\n- **Permissions** - - You must have the `s3tables:CreateTableBucket` permission to use this operation.\n- If you use this operation with the optional `encryptionConfiguration` parameter you must have the `s3tables:PutTableBucketEncryption` permission.\n- **Cloud Development Kit** - To use S3 Tables AWS CDK constructs, add the `@aws-cdk/aws-s3tables-alpha` dependency with one of the following options:\n\n- NPM: `npm i",
+    "gen": "For more information, see [Creating a table bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-buckets-create.html) in the *Amazon Simple Storage Service User Guide* .\n\n- **Permissions** - - You must have the `s3tables:CreateTableBucket` permission to use this operation.\n- If you use this operation with the optional `encryptionConfiguration` parameter you must have the `s3tables:PutTableBucketEncryption` permission.\n- **Cloud Development Kit** - To use S3 Tables AWS CDK constructs, add the `@aws-cdk/aws-s3tables-alpha` dependency with one of the following options:\n\n- NPM: `npm i @aws-cdk/aws-s3tables-alpha`\n- Yarn: `yarn add @aws-cdk/aws-s3tables-alpha`"
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_s3tables.CfnTableBucketPolicy.docs.custom.aws-cdk",
+    "ref": "/aws-s3tables-alpha`\n- Yarn: `yarn add @aws-cdk/aws-s3tables-alpha`"
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_s3tables.CfnTableBucketPolicy.docs.remarks",
+    "ref": "For more information, see [Adding a table bucket policy](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-bucket-policy.html#table-bucket-policy-add) in the *Amazon Simple Storage Service User Guide* .\n\n- **Permissions** - You must have the `s3tables:PutTableBucketPolicy` permission to use this operation.\n- **Cloud Development Kit** - To use S3 Tables AWS CDK constructs, add the `@aws-cdk/aws-s3tables-alpha` dependency with one of the following options:\n\n- NPM: `npm i",
+    "gen": "For more information, see [Adding a table bucket policy](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-bucket-policy.html#table-bucket-policy-add) in the *Amazon Simple Storage Service User Guide* .\n\n- **Permissions** - You must have the `s3tables:PutTableBucketPolicy` permission to use this operation.\n- **Cloud Development Kit** - To use S3 Tables AWS CDK constructs, add the `@aws-cdk/aws-s3tables-alpha` dependency with one of the following options:\n\n- NPM: `npm i @aws-cdk/aws-s3tables-alpha`\n- Yarn: `yarn add @aws-cdk/aws-s3tables-alpha`"
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_s3tables.CfnTablePolicy.docs.custom.aws-cdk",
+    "ref": "/aws-s3tables-alpha`\n- Yarn: `yarn add @aws-cdk/aws-s3tables-alpha`"
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_s3tables.CfnTablePolicy.docs.remarks",
+    "ref": "For more information, see [Adding a table policy](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-table-policy.html#table-policy-add) in the *Amazon Simple Storage Service User Guide* .\n\n- **Permissions** - You must have the `s3tables:PutTablePolicy` permission to use this operation.\n- **Cloud Development Kit** - To use S3 Tables AWS CDK constructs, add the `@aws-cdk/aws-s3tables-alpha` dependency with one of the following options:\n\n- NPM: `npm i",
+    "gen": "For more information, see [Adding a table policy](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables-table-policy.html#table-policy-add) in the *Amazon Simple Storage Service User Guide* .\n\n- **Permissions** - You must have the `s3tables:PutTablePolicy` permission to use this operation.\n- **Cloud Development Kit** - To use S3 Tables AWS CDK constructs, add the `@aws-cdk/aws-s3tables-alpha` dependency with one of the following options:\n\n- NPM: `npm i @aws-cdk/aws-s3tables-alpha`\n- Yarn: `yarn add @aws-cdk/aws-s3tables-alpha`"
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_secretsmanager.CfnSecretProps.properties[tags].docs.custom",
+    "ref": {
+     "": "."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_secretsmanager.CfnSecretProps.properties[tags].docs.remarks",
+    "ref": "Each tag is a key and value pair of strings in a JSON text string, for example:\n\n`[{\"Key\":\"CostCenter\",\"Value\":\"12345\"},{\"Key\":\"environment\",\"Value\":\"production\"}]`\n\nSecrets Manager tag key names are case sensitive. A tag with the key \"ABC\" is a different tag from one with key \"abc\".\n\nStack-level tags, tags you apply to the CloudFormation stack, are also attached to the secret.\n\nIf you check tags in permissions policies as part of your security strategy, then adding or removing a tag can change permissions. If the completion of this operation would result in you losing your permissions for this secret, then Secrets Manager blocks the operation and returns an `Access Denied` error. For more information, see [Control access to secrets using tags](https://docs.aws.amazon.com/secretsmanager/latest/userguide/auth-and-access_examples.html#tag-secrets-abac) and [Limit access to identities with tags that match secrets' tags](https://docs.aws.amazon.com/secretsmanager/latest/userguide/auth-and-access_examples.html#auth-and-access_tags2) .\n\nFor information about how to format a JSON parameter for the various command line tool environments, see [Using JSON for Parameters](https://docs.aws.amazon.com/cli/latest/userguide/cli-using-param.html#cli-using-param-json) . If your command-line tool or SDK requires quotation marks around the parameter, you should use single quotes to avoid confusion with the double quotes required in the JSON text.\n\nThe following restrictions apply to tags:\n\n- Maximum number of tags per secret: 50\n- Maximum key length: 127 Unicode characters in UTF-8\n- Maximum value length: 255 Unicode characters in UTF-8\n- Tag keys and values are case sensitive.\n- Do not use the `aws:` prefix in your tag names or values because AWS reserves it for AWS use. You can't edit or delete tag names or values with this prefix. Tags with this prefix do not count against your tags per secret limit.\n- If you use your tagging schema across multiple services and resources, other services might have restrictions on allowed characters. Generally allowed characters: letters, spaces, and numbers representable in UTF-8, plus the following special characters: + - = . _ : /",
+    "gen": "Each tag is a key and value pair of strings in a JSON text string, for example:\n\n`[{\"Key\":\"CostCenter\",\"Value\":\"12345\"},{\"Key\":\"environment\",\"Value\":\"production\"}]`\n\nSecrets Manager tag key names are case sensitive. A tag with the key \"ABC\" is a different tag from one with key \"abc\".\n\nStack-level tags, tags you apply to the CloudFormation stack, are also attached to the secret.\n\nIf you check tags in permissions policies as part of your security strategy, then adding or removing a tag can change permissions. If the completion of this operation would result in you losing your permissions for this secret, then Secrets Manager blocks the operation and returns an `Access Denied` error. For more information, see [Control access to secrets using tags](https://docs.aws.amazon.com/secretsmanager/latest/userguide/auth-and-access_examples.html#tag-secrets-abac) and [Limit access to identities with tags that match secrets' tags](https://docs.aws.amazon.com/secretsmanager/latest/userguide/auth-and-access_examples.html#auth-and-access_tags2) .\n\nFor information about how to format a JSON parameter for the various command line tool environments, see [Using JSON for Parameters](https://docs.aws.amazon.com/cli/latest/userguide/cli-using-param.html#cli-using-param-json) . If your command-line tool or SDK requires quotation marks around the parameter, you should use single quotes to avoid confusion with the double quotes required in the JSON text.\n\nThe following restrictions apply to tags:\n\n- Maximum number of tags per secret: 50\n- Maximum key length: 127 Unicode characters in UTF-8\n- Maximum value length: 255 Unicode characters in UTF-8\n- Tag keys and values are case sensitive.\n- Do not use the `aws:` prefix in your tag names or values because AWS reserves it for AWS use. You can't edit or delete tag names or values with this prefix. Tags with this prefix do not count against your tags per secret limit.\n- If you use your tagging schema across multiple services and resources, other services might have restrictions on allowed characters. Generally allowed characters: letters, spaces, and numbers representable in UTF-8, plus the following special characters: + - = . _ : / @."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_stepfunctions.CfnActivityProps.properties[tags].docs.custom",
+    "ref": {
+     "": "` ."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_stepfunctions.CfnActivityProps.properties[tags].docs.remarks",
+    "ref": "Tags may only contain Unicode letters, digits, white space, or these symbols: `_ . : / = + -",
+    "gen": "Tags may only contain Unicode letters, digits, white space, or these symbols: `_ . : / = + - @` ."
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_stepfunctions.CfnStateMachineProps.properties[tags].docs.custom",
+    "ref": {
+     "": "` ."
+    }
+   },
+   {
+    "path": ".types.aws-cdk-lib.aws_stepfunctions.CfnStateMachineProps.properties[tags].docs.remarks",
+    "ref": "Tags may only contain Unicode letters, digits, white space, or these symbols: `_ . : / = + -",
+    "gen": "Tags may only contain Unicode letters, digits, white space, or these symbols: `_ . : / = + - @` ."
+   }
+  ]
+ },
+ "other": []
+}
