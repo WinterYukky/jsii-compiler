@@ -1529,3 +1529,43 @@ with `ref-cdk.json` / `gen-cdk-54bf754.json` next to it).
 
 Wall-clock of the TS7 compiler on aws-cdk-lib during the loop: 57.5 / 61.3 / 60.7 / 60.9 / 63.1 / 63.4 s
 (c7i.4xlarge, type check + emit, `--strip-deprecated --compress-assembly`).
+
+## Phase 3C — wall-clock and CPU on larger machines, same box, classic vs preview branch (closed)
+
+Question answered (raised on the preview PR discussion): does the speed-up hold on the machines
+a release build uses? Same source as Phase 3B (aws/aws-cdk `42913b76`, real `lerna run build`
+of aws-cdk-lib with the monorepo's jsii 6.0.20 / TypeScript 6.0.3), same invocation as
+`cdk-build` (`--strip-deprecated deprecated_apis.txt --compress-assembly --no-fix-peer-dependencies`),
+preview branch `feat/ts7-backend-preview-1793929812` @ `54bf754` on stock `typescript@7.1.0-beta`
+(no spin/coarse patches). Node v22.23.4, Ubuntu 24.04, ap-northeast-1, 2026-11-07. Both
+compilers measured back to back on the same instance, interleaved (classic, ts7, classic, ...),
+3 runs each, `NODE_OPTIONS=--max-old-space-size=12288`.
+
+| Box | Compiler | wall run 1 / 2 / 3 | wall median | ratio | CPU s (cgroup, 2 runs) | max RSS (node) |
+|---|---|---|---|---|---|---|
+| c7i.8xlarge (32 vCPU) | classic 6.0.20 | 100.82 / 99.21 / 100.15 | **100.2 s** | | 131.2 / 130.8 | 5.6 GB |
+| c7i.8xlarge (32 vCPU) | ts7 54bf754 | 54.39 / 52.90 / 55.16 | **54.4 s** | **1.84x** | 95.0 / 95.9 | 2.0 GB |
+| c7i.16xlarge (64 vCPU) | classic 6.0.20 | 103.38 / 102.80 / 102.62 | **102.8 s** | | 135.1 / 132.8 | 5.6 GB |
+| c7i.16xlarge (64 vCPU) | ts7 54bf754 | 60.32 / 57.26 / 58.72 | **58.7 s** | **1.75x** | 101.0 / 103.3 | 2.0 GB |
+
+Notes:
+- CPU seconds: `/usr/bin/time -v` on the node process reports only 18 s of user time for ts7,
+  because the TypeScript 7 Go server is a child that is not waited for by the time `time` samples
+  rusage; the numbers above come from a `systemd-run --scope` cgroup (`cpu.stat usage_usec`), which
+  counts both processes. Classic: 126-130 s user + 4 s sys; ts7: 82-88 s user + 13-15 s sys (the
+  system time is the RPC transport).
+- The ts7 path uses about 1.75 cores on average (95 CPU-s / 54 s); the classic path about 1.3
+  (GC threads). Neither benefits from the extra cores of the 16xlarge; both are a few percent
+  slower there, consistent with the two instance types' clock difference. The remaining wall is
+  the serial request sequence from the Node client (Phase 3A decomposition), not CPU.
+- Max RSS is the Node process only (`time -v`); the Go server's memory is not included in the
+  ts7 figure.
+- Assembly identity: the three classic runs are byte-identical to each other and across the two
+  boxes (sha256 `4dc4eecf…`), the three ts7 runs likewise (`0b56bed2…`); classic vs ts7 differ in
+  exactly the 60 fields of Phase 3B (6 union order + 54 TS6 JSDoc parser quirk).
+- Earlier figures (54 s vs 106 s on a c7i.8xlarge with an older classic reference; 60-63 s on a
+  c7i.4xlarge) are superseded by this table for the PR body.
+
+Artifacts: `s3://alphaface-compile-transfer-tmp/lege-tsgo-poc/perf3c/<box>/` (`time-*.txt`,
+`perf-summary.txt`, `jsii-classic-1.json`, `jsii-ts7-1.json`), script `ec2-perf-3c.sh` and the
+cgroup re-measurement `cg.sh` next to it.
