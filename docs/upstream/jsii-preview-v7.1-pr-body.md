@@ -50,10 +50,11 @@ Compile time for the three small packages is well under a second of server time.
 
 | Machine | Classic (wall) | This branch (wall) | Ratio | Classic CPU | This branch CPU | Peak RSS of the Node process |
 |---|---|---|---|---|---|---|
+| c7i.4xlarge (16 vCPU) | 147.6 s | 65.8 s | 2.24x | 184 s | 104 s | 5.6 GB vs 2.0 GB |
 | c7i.8xlarge (32 vCPU) | 100.2 s | 54.4 s | 1.84x | 131 s | 95 s | 5.6 GB vs 2.0 GB |
 | c7i.16xlarge (64 vCPU) | 102.8 s | 58.7 s | 1.75x | 134 s | 102 s | 5.6 GB vs 2.0 GB |
 
-Neither compiler gets faster with more cores (both are a little slower on the larger machine, within the clock difference of the two instance types): the classic compiler is single-threaded and this branch is bound by the serial sequence of checker requests from the Node client, with the Go server using about 1.7 cores on average. The assemblies produced on the two machines are byte-identical per compiler.
+Going from 16 to 32 vCPUs helps the classic compiler more than this branch (its wall-clock drops by a third, this branch's by a sixth), and beyond that neither gets faster (both are a little slower on the 64 vCPU machine, within the clock difference of the instance types): the classic compiler is single-threaded apart from garbage collection, and this branch is bound by the serial sequence of checker requests from the Node client, with the Go server using about 1.7 cores on average. The assemblies produced on the three machines are byte-identical per compiler.
 
 ## Not in this PR
 

@@ -1543,6 +1543,8 @@ compilers measured back to back on the same instance, interleaved (classic, ts7,
 
 | Box | Compiler | wall run 1 / 2 / 3 | wall median | ratio | CPU s (cgroup, 2 runs) | max RSS (node) |
 |---|---|---|---|---|---|---|
+| c7i.4xlarge (16 vCPU) | classic 6.0.20 | 147.60 / 147.43 / 151.76 | **147.6 s** | | 187.2 / 180.3 | 5.6 GB |
+| c7i.4xlarge (16 vCPU) | ts7 54bf754 | 60.99 / 65.79 / 67.20 | **65.8 s** | **2.24x** | 105.4 / 103.6 | 2.0 GB |
 | c7i.8xlarge (32 vCPU) | classic 6.0.20 | 100.82 / 99.21 / 100.15 | **100.2 s** | | 131.2 / 130.8 | 5.6 GB |
 | c7i.8xlarge (32 vCPU) | ts7 54bf754 | 54.39 / 52.90 / 55.16 | **54.4 s** | **1.84x** | 95.0 / 95.9 | 2.0 GB |
 | c7i.16xlarge (64 vCPU) | classic 6.0.20 | 103.38 / 102.80 / 102.62 | **102.8 s** | | 135.1 / 132.8 | 5.6 GB |
@@ -1554,17 +1556,21 @@ Notes:
   rusage; the numbers above come from a `systemd-run --scope` cgroup (`cpu.stat usage_usec`), which
   counts both processes. Classic: 126-130 s user + 4 s sys; ts7: 82-88 s user + 13-15 s sys (the
   system time is the RPC transport).
-- The ts7 path uses about 1.75 cores on average (95 CPU-s / 54 s); the classic path about 1.3
-  (GC threads). Neither benefits from the extra cores of the 16xlarge; both are a few percent
-  slower there, consistent with the two instance types' clock difference. The remaining wall is
-  the serial request sequence from the Node client (Phase 3A decomposition), not CPU.
+- The ts7 path uses about 1.6-1.75 cores on average (95 CPU-s / 54 s on the 8xlarge); the
+  classic path about 1.25-1.3 (GC threads). 16 -> 32 vCPUs: classic -32% wall, ts7 -17% wall
+  (the classic run's GC threads and the ts7 Go server both get less contention from the
+  smaller machine's background load). 32 -> 64 vCPUs: neither benefits; both are a few percent
+  slower, consistent with the instance types' clock difference. The remaining ts7 wall is the
+  serial request sequence from the Node client (Phase 3A decomposition), not CPU.
+- The c7i.4xlarge row was measured 3 days after the other two (2026-11-10), same script, same
+  pinned commits; its classic/ts7 assemblies have the same sha256 as the other boxes.
 - Max RSS is the Node process only (`time -v`); the Go server's memory is not included in the
   ts7 figure.
 - Assembly identity: the three classic runs are byte-identical to each other and across the two
   boxes (sha256 `4dc4eecf…`), the three ts7 runs likewise (`0b56bed2…`); classic vs ts7 differ in
   exactly the 60 fields of Phase 3B (6 union order + 54 TS6 JSDoc parser quirk).
 - Earlier figures (54 s vs 106 s on a c7i.8xlarge with an older classic reference; 60-63 s on a
-  c7i.4xlarge) are superseded by this table for the PR body.
+  c7i.4xlarge without a same-box classic run) are superseded by this table for the PR body.
 
 Artifacts: `s3://alphaface-compile-transfer-tmp/lege-tsgo-poc/perf3c/<box>/` (`time-*.txt`,
 `perf-summary.txt`, `jsii-classic-1.json`, `jsii-ts7-1.json`), script `ec2-perf-3c.sh` and the
