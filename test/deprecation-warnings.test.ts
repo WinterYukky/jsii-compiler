@@ -993,7 +993,7 @@ function createVmContext(
     // single spaces.
     require: (id: string) => {
       if (!id.startsWith('./')) {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        // biome-ignore lint/style/noCommonJs: the generated warnings file is loaded with require()
         return require(id);
       }
       const code = jsFile(compilation, path.basename(id, '.js'))

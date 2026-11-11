@@ -31,7 +31,7 @@ import { JsiiError, parentFqn } from './utils';
 import { Validator } from './validator';
 import { SHORT_VERSION, VERSION } from './version';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
+// biome-ignore lint/style/noCommonJs: sort-json has no type declarations
 const sortJson = require('sort-json');
 
 const LOG = log4js.getLogger('jsii/assembler');

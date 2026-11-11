@@ -70,17 +70,67 @@ const project = new typescript.TypeScriptProject({
     },
   },
 
-  prettier: true,
-  prettierOptions: {
-    ignoreFile: false,
-    settings: {
-      bracketSpacing: true,
-      printWidth: 120,
-      quoteProps: javascript.QuoteProps.CONSISTENT,
-      semi: true,
-      singleQuote: true,
-      tabWidth: 2,
-      trailingComma: javascript.TrailingComma.ALL,
+  // Linting and formatting are done by Biome. ESLint (through
+  // @typescript-eslint/typescript-estree) requires the in-process TypeScript
+  // compiler API, which the TypeScript 7 package no longer ships.
+  eslint: false,
+  prettier: false,
+  biome: true,
+  biomeOptions: {
+    version: '^2.6',
+    biomeConfig: {
+      formatter: {
+        // Carried over from the Prettier configuration
+        indentStyle: javascript.biome_config.IndentStyle.SPACE,
+        indentWidth: 2,
+        lineWidth: 120,
+      },
+      javascript: {
+        formatter: {
+          bracketSpacing: true,
+          quoteStyle: javascript.biome_config.QuoteStyle.SINGLE,
+          // Prettier's `quoteProps: consistent` has no Biome equivalent; `preserve` keeps the existing quoting.
+          quoteProperties: javascript.biome_config.QuoteProperties.PRESERVE,
+          semicolons: javascript.biome_config.Semicolons.ALWAYS,
+          trailingCommas: javascript.biome_config.JsTrailingCommas.ALL,
+        },
+      },
+      linter: {
+        rules: {
+          complexity: {
+            // dot-notation
+            useLiteralKeys: 'error',
+            // unicorn/no-array-for-each
+            noForEach: 'error',
+          },
+          correctness: {
+            // import/no-extraneous-dependencies
+            noUndeclaredDependencies: {
+              level: 'error',
+              options: {
+                devDependencies: ['**/test/**', '**/build-tools/**', '**/projenrc/**', '.projenrc.ts'],
+                optionalDependencies: false,
+                peerDependencies: true,
+              },
+            },
+          },
+          style: {
+            // @typescript-eslint/no-require-imports
+            noCommonJs: 'error',
+            // unicorn/prefer-node-protocol
+            useNodejsImportProtocol: 'error',
+            // curly [multi-line, consistent] allows single-line bodies; Biome's rule does not.
+            useBlockStatements: 'off',
+          },
+          suspicious: {
+            // @typescript-eslint/no-shadow. Biome's rule also reports a type parameter
+            // of a static method shadowing the class's, and the key of an index
+            // signature, which typescript-eslint did not; 8 of its 9 findings on this
+            // code base are of that kind.
+            noShadow: 'off',
+          },
+        },
+      },
     },
   },
 
@@ -155,10 +205,14 @@ project.tryFindObjectFile('projenrc/tsconfig.json')?.patch(
 project.vscode!.settings.addSetting('explorer.excludeGitIgnore', true);
 // Use the TypeScript SDK from the project dependencies
 project.vscode!.settings.addSetting('typescript.tsdk', 'node_modules/typescript/lib');
-// Format-on-save using ESLint
-project.vscode!.extensions.addRecommendations('dbaeumer.vscode-eslint');
-project.vscode!.settings.addSetting('editor.codeActionsOnSave', { 'source.fixAll.eslint': 'explicit' });
-project.vscode!.settings.addSetting('eslint.validate', ['typescript']);
+// Format-on-save using Biome
+project.vscode!.extensions.addRecommendations('biomejs.biome');
+project.vscode!.settings.addSetting('editor.defaultFormatter', 'biomejs.biome');
+project.vscode!.settings.addSetting('editor.formatOnSave', true);
+project.vscode!.settings.addSetting('editor.codeActionsOnSave', {
+  'source.fixAll.biome': 'explicit',
+  'source.organizeImports.biome': 'explicit',
+});
 
 // Exports map...
 project.package.addField('exports', {
@@ -220,7 +274,6 @@ project.addDevDeps(
   '@types/lockfile',
   '@types/semver',
   'clone',
-  'eslint-plugin-unicorn',
   'fast-check',
   'jsii-1.x@npm:jsii@1',
   'lockfile',
@@ -234,25 +287,70 @@ project.preCompileTask.exec('tsx build-tools/code-gen.ts', {
 project.gitignore.addPatterns('/src/version.ts', '/jsii-outdir/', '/test/negatives/.*');
 project.gitignore.exclude('.DS_Store', '.lock');
 
-// Exclude negatives from tsconfig and eslint...
+// Exclude negatives from tsconfig and Biome...
 project.tsconfigDev.addExclude('test/negatives/**/*.ts');
-project.eslint?.addIgnorePattern('test/negatives/**/*.ts');
-
-// Customize ESLint rules
 project.tsconfigDev.addInclude('build-tools/**/*.ts');
-// build-tools/*.ts are loose files not owned by a tsconfig project; allow the
-// typescript-eslint project service to lint them via the default project
-// (projen 0.101 switched eslint to `parserOptions.projectService`).
-project.eslint?.allowDefaultProjectFiles('build-tools/code-gen.ts');
-project.eslint!.rules!['no-bitwise'] = ['off']; // The TypeScript compiler API leverages some bit-flags.
-project.eslint!.rules!.quotes = ['error', 'single', { avoidEscape: true, allowTemplateLiterals: true }];
 
-// Add Unicorn rules (https://github.com/sindresorhus/eslint-plugin-unicorn#rules)
-project.eslint?.addPlugins('unicorn');
-project.eslint?.addRules({
-  'unicorn/prefer-node-protocol': ['error'],
-  'unicorn/no-array-for-each': ['error'],
-  'unicorn/no-unnecessary-await': ['error'],
+// Biome scope: the same paths ESLint used to run on (projen adds src/** and test/**)
+project.biome!.addFilePattern('build-tools/**');
+project.biome!.addFilePattern('projenrc/**');
+project.biome!.addFilePattern('.projenrc.ts');
+project.biome!.addFilePattern('!test/negatives');
+project.biome!.addFilePattern('!**/*.generated.ts');
+project.biome!.addFilePattern('!test/**/__snapshots__');
+// ESLint/Prettier only ran on TypeScript sources; keep Markdown out of Biome's scope as well
+project.biome!.addFilePattern('!**/*.md');
+
+// Rules of Biome's recommended set that ESLint did not enforce here and the code
+// base does not follow (the count is the number of findings when this was set
+// up). They are turned off so that the switch from ESLint does not change any
+// source file; each can be enabled in its own change.
+project.biome!.expandLinterRules({
+  complexity: {
+    noBannedTypes: 'off', // 2
+    noStaticOnlyClass: 'off', // 2
+    noThisInStatic: 'off', // 10
+    noUselessContinue: 'off', // 1
+    noUselessSwitchCase: 'off', // 1
+    noUselessTernary: 'off', // 1
+    noUselessTypeConstraint: 'off', // 1
+    useArrowFunction: 'off', // 11
+    useOptionalChain: 'off', // 4
+  },
+  correctness: {
+    noSwitchDeclarations: 'off', // 1
+  },
+  performance: {
+    noAccumulatingSpread: 'off', // 3
+  },
+  style: {
+    noNonNullAssertion: 'off', // 207
+    useArrayLiterals: 'off', // 28
+    useConst: 'off', // 4
+    useImportType: 'off', // 59
+    useTemplate: 'off', // 5
+  },
+  suspicious: {
+    noConstEnum: 'off', // 1
+    noDoubleEquals: 'off', // 8, two of them intentionally loose (tsconfig validator)
+    noExplicitAny: 'off', // 99
+    noGlobalIsNan: 'off', // 3
+    noIdenticalTestTitle: 'off', // 1
+    noImplicitAnyLet: 'off', // 8, `let x;` whose type TypeScript infers from the assignments
+    noShadowRestrictedNames: 'off', // 1
+    noTemplateCurlyInString: 'off', // 82
+  },
+});
+
+// .projenrc.ts may require() and use any dependency (same exemptions as before)
+project.biome!.addOverride({
+  includes: ['.projenrc.ts'],
+  linter: {
+    rules: {
+      correctness: { noUndeclaredDependencies: 'off' },
+      style: { noCommonJs: 'off' },
+    },
+  },
 });
 
 // Register jsii-calc stuff in the work stream

@@ -524,7 +524,7 @@ export class Compiler implements Emitter {
    * Returns undefined if no such tsconfig could be found.
    */
   private findMonorepoPeerTsconfig(depName: string): string | undefined {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports,@typescript-eslint/no-var-requires
+    // biome-ignore lint/style/noCommonJs: loaded lazily, only when a monorepo peer is looked up
     const { builtinModules } = require('node:module');
     if ((builtinModules ?? []).includes(depName)) {
       // Can happen for modules like 'punycode' which are declared as dependency for polyfill purposes

@@ -47,7 +47,7 @@ for (const source of fs.readdirSync(SOURCE_DIR)) {
       expect(
         diagnostics
           // Remove ANSI color codes from the message so it's nicer in the snapshots file
-          // eslint-disable-next-line no-control-regex
+          // biome-ignore lint/suspicious/noControlCharactersInRegex: matches ANSI escape sequences
           .map((diag) => diag.replace(/\x1B\[[0-9;]*[a-z]/gi, ''))
           .join(''),
       ).toMatchSnapshot();
