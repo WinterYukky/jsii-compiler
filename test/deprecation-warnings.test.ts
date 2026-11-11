@@ -1,4 +1,3 @@
-// eslint-disable-next-line import/no-extraneous-dependencies
 // Collission with non-deprecated enum member
 import * as fs from 'node:fs';
 import * as path from 'node:path';

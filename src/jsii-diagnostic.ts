@@ -112,13 +112,10 @@ export class Code<T extends DiagnosticMessageFormatter = DiagnosticMessageFormat
   private static readonly byCode: Map<number, Code> = new Map();
   private static readonly byName: Map<string, Code> = new Map();
 
-  // eslint-disable-next-line @typescript-eslint/explicit-member-accessibility
   readonly #defaultCategory: ts.DiagnosticCategory;
 
-  // eslint-disable-next-line @typescript-eslint/explicit-member-accessibility
   #category?: ts.DiagnosticCategory;
 
-  // eslint-disable-next-line @typescript-eslint/explicit-member-accessibility
   #formatter: T;
 
   /**
@@ -881,7 +878,6 @@ export class JsiiDiagnostic implements ts.Diagnostic {
 
   public readonly relatedInformation = new Array<ts.DiagnosticRelatedInformation>();
 
-  // eslint-disable-next-line @typescript-eslint/explicit-member-accessibility
   #formatted?: string;
 
   /**

@@ -814,14 +814,11 @@ export class Assembler implements Emitter {
             this._submoduleMap.set(type.symbol, ns);
           }
           if (type.symbol.exports) {
-            // eslint-disable-next-line no-await-in-loop
             this._addToSubmodule(ns, symbol, packageRoot);
           }
         } else if (ts.isModuleDeclaration(decl)) {
-          // eslint-disable-next-line no-await-in-loop
           this._registerNamespaces(symbol, packageRoot);
         } else if (ts.isNamespaceExport(decl)) {
-          // eslint-disable-next-line no-await-in-loop
           this._registerNamespaces(symbol, packageRoot);
         }
       }
@@ -834,7 +831,6 @@ export class Assembler implements Emitter {
    * @param node       a node found in a module
    * @param namePrefix the prefix for the types' namespaces
    */
-  // eslint-disable-next-line complexity
   private _visitNode(node: ts.Declaration, context: EmitContext): spec.Type[] {
     if (ts.isNamespaceExport(node)) {
       // export * as ns from 'module';
@@ -1117,7 +1113,6 @@ export class Assembler implements Emitter {
     };
   }
 
-  // eslint-disable-next-line complexity
   private _visitClass(type: ts.Type, ctx: EmitContext): spec.ClassType | undefined {
     if (LOG.isTraceEnabled()) {
       LOG.trace(`Processing class: ${chalk.gray(ctx.namespace.join('.'))}.${chalk.cyan(type.symbol.name)}`);
@@ -1189,7 +1184,6 @@ export class Assembler implements Emitter {
         continue;
       }
 
-      // eslint-disable-next-line no-await-in-loop
       const ref = this._typeReference(
         base,
         type.symbol.valueDeclaration ?? type.symbol.declarations?.[0],
@@ -1340,16 +1334,13 @@ export class Assembler implements Emitter {
           continue;
         }
 
-        // eslint-disable-next-line no-await-in-loop
         if (ts.isMethodDeclaration(memberDecl) || ts.isMethodSignature(memberDecl)) {
-          // eslint-disable-next-line no-await-in-loop
           this._visitMethod(member!, jsiiType, ctx.replaceStability(jsiiType.docs?.stability), classDecl);
         } else if (
           ts.isPropertyDeclaration(memberDecl) ||
           ts.isPropertySignature(memberDecl) ||
           ts.isAccessor(memberDecl)
         ) {
-          // eslint-disable-next-line no-await-in-loop
           this._visitProperty(member!, jsiiType, ctx.replaceStability(jsiiType.docs?.stability), classDecl);
         } else {
           this._diagnostics.push(
@@ -1359,7 +1350,6 @@ export class Assembler implements Emitter {
             ),
           );
         }
-        /* eslint-enable no-await-in-loop */
       }
     }
 
@@ -1379,8 +1369,7 @@ export class Assembler implements Emitter {
           for (const param of signature.getParameters()) {
             jsiiType.initializer.parameters = jsiiType.initializer.parameters ?? [];
 
-            const jsiiParam = // eslint-disable-next-line no-await-in-loop
-              this._toParameter(param, ctx.replaceStability(jsiiType.docs?.stability));
+            const jsiiParam = this._toParameter(param, ctx.replaceStability(jsiiType.docs?.stability));
 
             if (containsIntersection(jsiiParam.type)) {
               this._diagnostics.push(JsiiDiagnostic.JSII_1010_INTERSECTION_NOT_IN_CTOR.create(param.declarations?.[0]));
@@ -1402,7 +1391,6 @@ export class Assembler implements Emitter {
           const decl = param.valueDeclaration ?? param.declarations?.[0];
 
           if (decl && ts.isParameterPropertyDeclaration(decl, decl.parent) && !this._isPrivateOrInternal(param)) {
-            // eslint-disable-next-line no-await-in-loop
             this._visitProperty(param, jsiiType, memberEmitContext, ctorDeclaration.parent);
           }
         }
@@ -1631,7 +1619,6 @@ export class Assembler implements Emitter {
         fqn: `${[this.projectInfo.name, ...ctx.namespace].join('.')}.${symbol.name}`,
         kind: spec.TypeKind.Enum,
         members: members.map((m) => {
-          // eslint-disable-next-line @typescript-eslint/no-shadow
           const { docs } = this._visitDocumentation(m.symbol, typeContext);
           return { name: m.symbol.name, docs };
         }),
@@ -1822,10 +1809,8 @@ export class Assembler implements Emitter {
         }
 
         if (decl && (ts.isMethodDeclaration(decl) || ts.isMethodSignature(decl))) {
-          // eslint-disable-next-line no-await-in-loop
           this._visitMethod(member, jsiiType, ctx.replaceStability(jsiiType.docs?.stability), typeDecl);
         } else if (decl && (ts.isPropertyDeclaration(decl) || ts.isPropertySignature(decl) || ts.isAccessor(decl))) {
-          // eslint-disable-next-line no-await-in-loop
           this._visitProperty(member, jsiiType, ctx.replaceStability(jsiiType.docs?.stability), typeDecl);
         } else {
           this._diagnostics.push(
@@ -2421,7 +2406,6 @@ export class Assembler implements Emitter {
           optional = true;
           continue;
         }
-        // eslint-disable-next-line no-await-in-loop
         const resolvedType = this._typeReference(subType, declaration, purpose);
         if (types.some((ref) => deepEqual(ref, resolvedType))) {
           continue;

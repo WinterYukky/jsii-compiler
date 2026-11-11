@@ -172,14 +172,11 @@ export function compileJsiiForTest<O extends TestCompilationOptions>(
         dtsFile = path.join(projectInfo.tsc.outDir, dtsFile);
       }
 
-      // eslint-disable-next-line no-await-in-loop
       files[jsFile] = fs.readFileSync(jsFile, { encoding: 'utf-8' });
-      // eslint-disable-next-line no-await-in-loop
       files[dtsFile] = fs.readFileSync(dtsFile, { encoding: 'utf-8' });
 
       const warningsFileName = '.warnings.jsii.js';
       if (fs.existsSync(warningsFileName)) {
-        // eslint-disable-next-line no-await-in-loop
         files[warningsFileName] = fs.readFileSync(warningsFileName, {
           encoding: 'utf-8',
         });
@@ -212,7 +209,6 @@ function inTempDir<T>(block: () => T): T {
 }
 
 function inOtherDir(dir: string) {
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-constraint
   return <T extends unknown>(block: () => T): T => {
     const origDir = process.cwd();
     process.chdir(dir);

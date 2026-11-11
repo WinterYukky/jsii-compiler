@@ -370,15 +370,12 @@ export class Match {
    */
   public static ANY: Matcher = (_val, _options) => true;
 
-  // eslint-disable-next-line @typescript-eslint/member-ordering
   public static TRUE: Matcher = Match.eq(true);
-  // eslint-disable-next-line @typescript-eslint/member-ordering
   public static FALSE: Matcher = Match.eq(false);
 
   /**
    * Missing (undefined) value
    */
-  // eslint-disable-next-line @typescript-eslint/member-ordering
   public static MISSING = wrapMatcher(
     (actual) => actual === null || actual === undefined,
     (actual) => `Expected value to be present, got ${JSON.stringify(actual)}`,

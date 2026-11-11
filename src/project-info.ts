@@ -443,7 +443,6 @@ class DependencyResolver {
   public discoverDependencyTree(root: string, dependencies: Record<string, string>): Record<string, string> {
     const ret: Record<string, string> = {};
     for (const [name, declaration] of Object.entries(dependencies)) {
-      // eslint-disable-next-line no-await-in-loop
       let resolved;
       try {
         resolved = this.resolveDependency(root, name, declaration);
@@ -651,7 +650,6 @@ function _resolveVersion(dep: string, searchPath: string): { version: string; lo
   const localPackage = path.resolve(searchPath, matches[1]);
   return {
     // Rendering as a caret version to maintain uniformity against the "standard".
-    // eslint-disable-next-line @typescript-eslint/no-require-imports,@typescript-eslint/no-var-requires
     version: `^${JSON.parse(fs.readFileSync(path.join(localPackage, 'package.json'), 'utf-8')).version}`,
     localPackage,
   };

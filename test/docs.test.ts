@@ -322,7 +322,6 @@ test('stability is inherited from parent type', () => {
   ];
 
   for (const [tag, stability] of stabilities) {
-    // eslint-disable-next-line no-await-in-loop
     const assembly = compile(`
       /**
        * ${tag}
@@ -337,7 +336,6 @@ test('stability is inherited from parent type', () => {
         }
       }
     `);
-    /* eslint-enable no-await-in-loop */
 
     const classType = assembly.types!['testpkg.Foo'] as spec.ClassType;
     const initializer = classType.initializer!;

@@ -57,20 +57,11 @@ export function symbolIdentifier(
   }
 
   // If this symbol happens to be an alias, resolve it first
-  // eslint-disable-next-line no-bitwise
   while ((sym.flags & ts.SymbolFlags.Alias) !== 0) {
     sym = typeChecker.getAliasedSymbol(sym);
   }
 
-  const isMember =
-    // eslint-disable-next-line no-bitwise
-    (sym.flags &
-      // eslint-disable-next-line no-bitwise
-      (ts.SymbolFlags.Method |
-        // eslint-disable-next-line no-bitwise
-        ts.SymbolFlags.Property |
-        ts.SymbolFlags.EnumMember)) !==
-    0;
+  const isMember = (sym.flags & (ts.SymbolFlags.Method | ts.SymbolFlags.Property | ts.SymbolFlags.EnumMember)) !== 0;
 
   const tsName = typeChecker.getFullyQualifiedName(sym);
 

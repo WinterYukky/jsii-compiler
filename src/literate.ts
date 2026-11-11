@@ -92,7 +92,6 @@ export function includeAndRenderExamples(lines: string[], loader: FileLoader, pr
     if (m) {
       // Found an include
       const filename = m[2];
-      // eslint-disable-next-line no-await-in-loop
       const { lines: source, fullPath } = loader(filename);
       // 'lit' source attribute will make snippet compiler know to extract the same source
       // Needs to be relative to the project root.
@@ -201,7 +200,6 @@ function markdownify(lines: string[], codeBlockAnnotations: string[]): string[] 
    */
   function flushTS() {
     if (typescriptLines.length !== 0) {
-      // eslint-disable-next-line prefer-template
       ret.push(
         `\`\`\`ts${codeBlockAnnotations.length > 0 ? ` ${codeBlockAnnotations.join(' ')}` : ''}`,
         ...typescriptLines,
