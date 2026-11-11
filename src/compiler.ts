@@ -353,8 +353,8 @@ export class Compiler implements Emitter {
       this.options.projectReferences !== undefined
         ? this.options.projectReferences
         : this.options.projectInfo.projectReferences !== undefined
-        ? this.options.projectInfo.projectReferences
-        : false;
+          ? this.options.projectInfo.projectReferences
+          : false;
     if (isComposite) {
       references = this.findProjectReferences();
     }

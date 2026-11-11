@@ -402,7 +402,10 @@ export class ValidationError extends Error {
 }
 
 export class ObjectValidator {
-  public constructor(public ruleSet: RuleSet, private readonly dataName: string = 'data') {}
+  public constructor(
+    public ruleSet: RuleSet,
+    private readonly dataName: string = 'data',
+  ) {}
 
   /**
    * Validated the provided data against the set of rules.

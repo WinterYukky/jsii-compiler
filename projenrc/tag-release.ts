@@ -247,9 +247,9 @@ async function main(): Promise<void> {
 
   const { version } =
     prerelease != null
-      ? (latestPrerelease ?? latestRelease)?.inc('prerelease', prerelease) ??
-        new SemVer(`${versionMajorMinor}.0-${prerelease}.0`)
-      : latestRelease?.inc('patch') ?? new SemVer(`${versionMajorMinor}.0`);
+      ? ((latestPrerelease ?? latestRelease)?.inc('prerelease', prerelease) ??
+        new SemVer(`${versionMajorMinor}.0-${prerelease}.0`))
+      : (latestRelease?.inc('patch') ?? new SemVer(`${versionMajorMinor}.0`));
 
   if (verbose) {
     console.debug(`Determined version number: ${version}`);

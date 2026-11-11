@@ -16,7 +16,10 @@ export interface ReleaseWorkflowProps {
 }
 
 export class ReleaseWorkflow {
-  public constructor(private readonly project: typescript.TypeScriptProject, props: ReleaseWorkflowProps) {
+  public constructor(
+    private readonly project: typescript.TypeScriptProject,
+    props: ReleaseWorkflowProps,
+  ) {
     new ReleaseTask(project);
     new TagReleaseTask(project);
 

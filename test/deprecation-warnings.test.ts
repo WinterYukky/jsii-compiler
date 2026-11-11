@@ -3,9 +3,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vm from 'node:vm';
-
-import { compile, Lock } from './fixtures';
 import { compileJsiiForTest, HelperCompilationResult } from '../lib';
+import { compile, Lock } from './fixtures';
 
 const DEPRECATED = '/** @deprecated Use something else */';
 

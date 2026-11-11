@@ -1,4 +1,4 @@
-import { javascript, JsonPatch, github, typescript, YamlFile } from 'projen';
+import { github, JsonPatch, javascript, typescript, YamlFile } from 'projen';
 import { BuildWorkflow } from './projenrc/build-workflow';
 import { JsiiCalcFixtures } from './projenrc/fixtures';
 import { ReleaseWorkflow } from './projenrc/release';
