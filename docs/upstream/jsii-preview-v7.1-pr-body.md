@@ -1,30 +1,36 @@
 # Draft PR body — aws/jsii-compiler: compile with the TypeScript 7 programmatic API (follow-up to the preview/v7.1 dependency bump)
 
 > Paste-ready body for the PR from `WinterYukky/jsii-compiler:feat/ts7-backend-preview-1793929812` to `aws/jsii-compiler:preview/v7.1`.
-> Head at the time of writing: `54bf754` (nine commits on top of `c50a54c`). Reference the dependency-bump PR by URL, not by number. Paragraphs are single lines for clean GitHub rendering.
+> Head at the time of writing: `df34e4e` (13 commits on top of `f246a4d`, plus the two merges of `preview/v7.1`). Reference other PRs by URL, not by number. Paragraphs are single lines for clean GitHub rendering.
 > Suggested title: `feat: compile with the TypeScript 7 programmatic API`
 
 ---
 
 ## Summary
 
-The `preview/v7.1` branch pins `typescript@7.1.0-beta`, whose package no longer ships the in-process compiler API (`ts.Program`, `TypeChecker`, transformers) the compiler was built on; `yarn compile` fails with 936 type errors there and the follow-up was left to a separate change. This is that change: the compiler now drives the TypeScript 7 programmatic API (`typescript/sync`, an out-of-process compiler the client talks to over handles) and it is the only way the compiler works. There is no mode switch and no fallback to the classic API.
+The `preview/v7.1` branch depends on `typescript@7.1.0-beta` (installed as `@typescript/native` and imported as `#typescript` since https://github.com/aws/jsii-compiler/pull/2869), whose package no longer ships the in-process compiler API (`ts.Program`, `TypeChecker`, transformers) the compiler was built on; `yarn compile` fails with 920 type errors there and the follow-up was left to a separate change. This is that change: the compiler now drives the TypeScript 7 programmatic API (`#typescript/sync`, an out-of-process compiler the client talks to over handles) and it is the only way the compiler works. There is no mode switch and no fallback to the classic API. The TypeScript 6 dev dependency that the aliasing change introduced keeps serving ESLint and the test suite's own type-check, as intended there.
 
-The result builds (`npx projen compile` reports 0 errors), produces assemblies identical to the classic compiler on the packages I compared, and passes the parts of the test suite that do not depend on the three features deferred to follow-up changes (listed under "Not in this PR").
+The result builds (`npx projen build` passes end to end, including ESLint and the pacmak job's fixture tarballs), produces assemblies identical to the classic compiler on the packages I compared, and passes the parts of the test suite that do not depend on the three features deferred to follow-up changes (listed under "Not in this PR").
 
 ## What changes
 
-**Removed (13 source files, about 7,700 lines).** Everything that walked the TypeScript AST or type checker in-process: `src/assembler.ts`, `src/validator.ts`, `src/emitter.ts`, `src/node-bindings.ts`, `src/type-tracker.ts`, `src/directives.ts`, `src/docs.ts`, `src/reserved-words.ts`, `src/sets.ts`, and the emit transforms (`src/transforms/deprecated-remover.ts`, `deprecation-warnings.ts`, `runtime-info.ts`, `utils.ts`). The two test files that exercised only that code (`test/directives.test.ts`, `test/transforms/runtime-info.test.ts`) go with them.
+**Removed (11 source files, about 3,600 lines).** Everything that walked the TypeScript AST or type checker in-process and has no counterpart over the new API: `src/validator.ts`, `src/node-bindings.ts`, `src/type-tracker.ts`, `src/directives.ts`, `src/docs.ts`, `src/reserved-words.ts`, `src/sets.ts`, and the emit transforms (`src/transforms/deprecated-remover.ts`, `deprecation-warnings.ts`, `runtime-info.ts`, `utils.ts`).
 
-**Added (about 3,500 lines).**
-- `src/ts7/` — the TypeScript 7 host (`ts7-host.ts`, `ts7-api.ts`: locating and loading the package, opening the project), the assembler (`assembler.ts`, a structured port of the classic one, method by method, over the TypeScript 7 checker), the emit pipeline (`ts7-emit.ts`: `.js`/`.d.ts` emit through the server plus the jsii runtime-type-info injection as a post-emit pass) and the orchestration (`index.ts`). This code existed on my experimental branch behind an environment variable and is now the compiler.
+**Rewritten in place.**
+- `src/assembler.ts` (3,500 → 2,500 lines) — the assembler over the TypeScript 7 checker. It is a structured port of the classic one, method by method (`_visitClass`, `_visitInterface`, `_visitEnum`, `_visitMethod`, `_visitProperty`, `_visitDocumentation`), reading the raw handles the API returns rather than wrapping them to look like `ts.Symbol`/`ts.Type`. Documentation (JSDoc tags, `{@link}` references, inheritance of docs), `@internal`, `@jsii ignore`, `@jsii struct`, `--strip-deprecated` on the assembly, submodules and `.jsiirc.json` are handled here.
+- `src/emitter.ts` — `.js`/`.d.ts` emit through the server plus the jsii runtime-type-info injection (`Symbol.for("jsii.rtti")` on each exported class). The classic implementation did this with a `CustomTransformer` during emit; the new API has no transformer hook, so it is a post-emit text pass over the emitted `.js`, producing the same marker.
+- `src/compiler.ts` (+389/−337) — keeps the tsconfig generation/validation and project-reference discovery; the compilation itself (`buildProject`: type check, assemble, write the assembly, emit) and the mapping of the API's diagnostics to the compiler's `Diagnostic` live here now.
+
+**Added (about 500 lines).**
+- `src/compiler-host.ts` — loading the TypeScript 7 API (`#typescript/sync`, `#typescript/ast`) and the `CompilerHost` that owns an API session and the project snapshot (program + checker) opened for a tsconfig.
 - `src/diagnostic.ts` — the compiler's own minimal `Diagnostic` model and renderer. TypeScript 7 does not export `ts.Diagnostic`; categories keep the classic numeric values so `jsii.diagnostics` configuration keeps its meaning, and the renderer reproduces the `file:line:col - error TSxxxx:` layout with source context.
 - `src/tsconfig/read.ts` — reading a user-provided `tsconfig.json` with its `extends` chain resolved (TypeScript 7 parses the file on the server; the validator still needs the effective JSON).
-- `test/ts-jest-transformer.js` — a 20-line shim so ts-jest keeps working (see "Known issues on preview/v7.1 itself").
 
-**Modified.** `src/compiler.ts` keeps the tsconfig generation/validation and project-reference discovery and delegates compilation to `ts7Emit` (+91/−354). `src/jsii-diagnostic.ts`, `src/utils.ts`, `src/warnings.ts`, `src/project-info.ts` and `src/tsconfig/*` are retyped from `ts.*` to the compiler's own types; tsconfig handling works on the JSON form end to end, with the case-insensitive option values and `lib` names normalized the way the classic parser did implicitly. `src/common/symbol-id.ts` keeps `symbolIdentifier` with structural parameter types (see "Breaking").
+**Modified.** `src/jsii-diagnostic.ts`, `src/utils.ts`, `src/warnings.ts`, `src/project-info.ts` and `src/tsconfig/*` are retyped from `ts.*` to the compiler's own types; tsconfig handling works on the JSON form end to end, with the case-insensitive option values and `lib` names normalized the way the classic parser did implicitly. `src/common/symbol-id.ts` keeps `symbolIdentifier` with structural parameter types (see "Breaking").
 
-Net against `preview/v7.1`: 62 files, +4,451/−8,675.
+**Tests.** The test files stay where they were and keep importing `typescript` (TypeScript 6) where they did. `test/directives.test.ts` runs the behavioural tests of `@jsii ignore`; its parser-level tests and the directive diagnostics are skipped. `test/transforms/runtime-info.test.ts` is rewritten as an end-to-end test of the emitted JavaScript (the marker is read back the way the runtime does) since the transformer it unit-tested is gone. `test/integration.test.ts` runs without `--add-deprecation-warnings` (it also packs the fixture tarballs for the pacmak job). New: `test/assembler.test.ts`, `test/emitter.test.ts`, `test/compiler-host.test.ts` for the pure helpers.
+
+Net against `preview/v7.1`: 52 files, +4,044/−7,803.
 
 ## Parity
 
@@ -34,7 +40,7 @@ I compared the `.jsii` produced by this branch against the one produced by the c
 |---|---|---|
 | `constructs` (12 types, 53 members) | jsii 6.0.18, built from source | Identical. Emitted `.js`/`.d.ts` file set identical, every `.d.ts` byte-identical, runtime type info (`Symbol.for('jsii.rtti')`) identical. |
 | `@aws-cdk/cloud-assembly-schema` (59 types, 213 members) | jsii 5.7.5, built from source | Identical except one field in category (a) below. |
-| jsii-calc fixtures of this repository (`@scope/jsii-calc-base-of-base`, `@scope/jsii-calc-base`, `@scope/jsii-calc-lib`, `jsii-calc`: 297 types, 728 members in `jsii-calc` alone) | jsii 6.0.20 from npm | Three packages identical; `jsii-calc` identical except three fields in category (a). |
+| jsii-calc fixtures of this repository (`@scope/jsii-calc-base-of-base`, `@scope/jsii-calc-base`, `@scope/jsii-calc-lib`, `jsii-calc`: 297 types, 728 members in `jsii-calc` alone) | jsii 6.0.20 from npm | Three packages identical; `jsii-calc` identical except three fields in category (a) (visible as the only non-metadata change in `test/__snapshots__/integration.test.ts.snap`). |
 | `aws-cdk-lib` from source (aws/aws-cdk `main` at `42913b76`, 23,131 types, built with `--strip-deprecated --compress-assembly` as `lerna run build` does) | jsii 6.0.20 as pinned by the monorepo, the actual `lerna run build` artifact | 60 differing leaf fields out of the whole assembly, all in the two categories below; 0 others. |
 
 The two remaining categories, with the complete field lists in [`strict-exclusions-aws-cdk-lib-54bf754.json`](strict-exclusions-aws-cdk-lib-54bf754.json):
@@ -58,12 +64,12 @@ Going from 16 to 32 vCPUs helps the classic compiler more than this branch (its 
 
 ## Not in this PR
 
-These three areas are intentionally left out so the compiler becomes usable on `preview/v7.1` first. Each behaves explicitly rather than silently, and its tests are kept with `describe.skip`/`test.skip` and a `TODO(ts7)` comment rather than deleted.
+These three areas are intentionally left out so the compiler becomes usable on `preview/v7.1` first. Each behaves explicitly rather than silently, and its tests are kept with `describe.skip`/`test.skip` and a `@TODO(ts7)` comment rather than deleted (180 skipped tests in total).
 
 | Area | Current behaviour on this branch | Skipped tests | Proposed follow-up |
 |---|---|---|---|
-| A. jsii validation diagnostics (`JSII_xxxx` codes from the classic validator: visibility/type/optionality changes in overrides, intersection-type restrictions, exported-but-hidden types, enum value duplicates, naming rules, inline `@jsii suppress` directives, …) | The assembly is produced without these checks; TypeScript's own diagnostics are reported as before. The `overrides` data the same pass produced is included. | 136 (`negatives` 92, `type-intersections` 22, `warnings` 13, `class-covariant-overrides` 8, `enums` 1) | First follow-up: port the validator over `@jsii/spec` (it is mostly spec-level already; the AST-bound parts need positions from the TypeScript 7 declarations). |
-| B. `--add-deprecation-warnings` (generation of `.warnings.jsii.js` and the call injection) | Fails with an explicit error. | 29 (`deprecation-warnings` 28, `integration` 1) | Second follow-up; the generator needs a TypeScript 7 replacement for the transformer-based injection. |
+| A. jsii validation diagnostics (`JSII_xxxx` codes from the classic validator: visibility/type/optionality changes in overrides, intersection-type restrictions, exported-but-hidden types, enum value duplicates, naming rules, inline `@jsii suppress` directives, …) | The assembly is produced without these checks; TypeScript's own diagnostics are reported as before. The `overrides` data the same pass produced is included. | 149 (`negatives` 92, `type-intersections` 22, `warnings` 13, `directives` 13, `class-covariant-overrides` 8, `enums` 1) | First follow-up: port the validator over `@jsii/spec` (it is mostly spec-level already; the AST-bound parts need positions from the TypeScript 7 declarations). |
+| B. `--add-deprecation-warnings` (generation of `.warnings.jsii.js` and the call injection) | Fails with an explicit error. The integration test compiles the fixtures without the flag for now. | 28 (`deprecation-warnings`) | Second follow-up; the generator needs a TypeScript 7 replacement for the transformer-based injection. |
 | C. `--strip-deprecated` on the emitted `.js`/`.d.ts` | The assembly is stripped (members, types, allow-list honoured); the emitted JavaScript and declarations still contain the deprecated members. | 3 (`deprecated-remover`) | Third follow-up, together with B, since both are emit-side transforms. |
 
 One smaller difference I am aware of and did not address: the `symbolIdentifier`-based resolution of foreign types needs the dependency's assembly to carry `symbolId`s (assemblies without them fall back to matching top-level type names, as before).
@@ -72,20 +78,13 @@ One smaller difference I am aware of and did not address: the `symbolIdentifier`
 
 - `--watch` is rejected with an explicit error. The TypeScript 7 API supports snapshot updates, so watch mode can be rebuilt, but it is not part of this change.
 - `--add-deprecation-warnings` is rejected with an explicit error (see above).
-- The experimental switches of my earlier branch are gone: `JSII_COMPILER_BACKEND`, the `typescript7` alias package, `JSII_TS7_BATCH` and `JSII_TS7_SKIP_TYPECHECK`. `JSII_TS7_TYPESCRIPT` (explicit path to a `typescript` >= 7.1 package) is kept as a development aid.
+- The experimental switches of my earlier branch are gone: `JSII_COMPILER_BACKEND`, the `typescript7` alias package, `JSII_TS7_BATCH`, `JSII_TS7_SKIP_TYPECHECK` and `JSII_TS7_TYPESCRIPT`. The TypeScript package is the one the `#typescript` import resolves to, nothing else.
 - Programmatic API: `Compiler.emit()` returns the compiler's own `EmitResult` (`emitSkipped`, `diagnostics`, `emittedFiles`) and diagnostics are the compiler's own `Diagnostic` (`messageText` is always a string; `file` is `{ fileName, text? }`) instead of `ts.EmitResult`/`ts.Diagnostic`. `compileJsiiForTest` and the other helpers in `jsii` keep their signatures and stay synchronous (the TypeScript 7 API is an ES module and is loaded with `require(esm)`, hence the Node >= 22.12 floor the branch already has).
 - `jsii/common` still exports `symbolIdentifier` and `normalizePath`. `symbolIdentifier`'s first two parameters are now structural (`{ getAliasedSymbol, getFullyQualifiedName }` and `{ flags }`) instead of `ts.TypeChecker`/`ts.Symbol`; a classic checker and symbol still satisfy them, so jsii-rosetta's `symbolIdentifier(typeChecker, declSym, { assembly })` (`src/jsii/jsii-utils.ts`) type-checks unchanged. Rosetta itself pins `jsii: ~6.0.0` and the classic `typescript: ~6.0`, so nothing changes for it until it moves to TypeScript 7, at which point it needs its own port of the classic API usage anyway.
 - Packages that import other internals of the `jsii` package (`src/assembler.ts`, the transforms, the validator) lose them; `package.json` only exported `.`, `./bin/jsii`, `./package.json` and `./common`, so I expect no supported consumer to be affected.
 
-## Known issues on preview/v7.1 itself
-
-Neither is introduced by this PR; both come from tooling that `require('typescript')`s the classic API by name and gets the TypeScript 7 package, whose main entry only exports `version`.
-
-- `eslint` cannot start on the branch: `@typescript-eslint/typescript-estree` fails at load time (`Cannot read properties of undefined (reading 'Cjs')`). I did not change this; the same redirection trick used for ts-jest would work, or a TypeScript 6 install for lint only.
-- ts-jest needs the classic API from several of its own modules, so its `compiler` option alone is not enough and yarn `packageExtensions` cannot help (the peer dependency on the root `typescript` wins). `test/ts-jest-transformer.js` redirects `require('typescript')` issued from inside ts-jest to a tooling-only `typescript6` devDependency; the compiler itself is built with the TypeScript 7 package. It can be removed when ts-jest supports TypeScript 7.
-
 ## Tests
 
-`npx projen compile`: 0 errors (from 936 on the branch). `npx jest --ci`: 30 of 32 suites run, 257 tests pass, 168 are skipped with `TODO(ts7)` comments as itemised above, 0 fail. `tsc -p test/tsconfig.json --noEmit` passes. The parity comparison above is a field-by-field diff of the whole assembly JSON (not the type-space comparison script of the earlier experiment) against classic reference assemblies built from the same sources.
+From a fresh clone with the current `lts/*` Node (26): `yarn install --immutable`, `npx projen && npx projen pre-compile && npx projen compile && npx projen post-compile` and `npx projen test` all exit 0 and leave the tree clean. `compile`: 0 errors (from 920 on the branch). `test`: the type-check of the test suite passes, jest runs 34 of 35 suites with 273 tests passing, 180 skipped with `@TODO(ts7)` comments as itemised above and 0 failing, and ESLint passes. `jsii-pacmak --code-only --recurse` on the fixture tarballs the integration test packs generates all five targets. The parity comparison above is a field-by-field diff of the whole assembly JSON (not the type-space comparison script of the earlier experiment) against classic reference assemblies built from the same sources.
 
 I used an AI assistant (Claude, through an agent) as a tool for the port, the comparisons and the drafting; the scope, the design decisions and the review of every change are mine.
