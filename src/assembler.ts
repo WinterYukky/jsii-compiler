@@ -295,6 +295,10 @@ export class Assembler {
   private readonly strippedTypes = new Map<string, any>();
   /** Submodule export symbols by submodule FQN (for JSII5011 related information). */
   private readonly submoduleSymbols = new Map<string, any>();
+  /** Submodule export symbols grouped by the FQN of their parent namespace (built on first use). */
+  private submodulesByParent?: Map<string, any[]>;
+  /** Resolved symbols of heritage clause entries (`extends X` / `implements X`), by node. */
+  private readonly heritageSymbols = new Map<any, any>();
 
   public constructor(ts: TypeScriptApi, project: TypeScriptProject, private readonly options: AssemblerOptions) {
     this.ts = ts;
@@ -641,13 +645,20 @@ export class Assembler {
    * TYPE at the heritage node itself and taking its symbol.
    */
   private _heritageBaseSymbol(t: any): any {
-    const viaExpression = this._symbolAtNodeSafe(t.expression);
-    if (viaExpression) {
-      return this._resolveAlias(viaExpression);
+    if (this.heritageSymbols.has(t)) {
+      return this.heritageSymbols.get(t);
     }
-    const type = this.checker.getTypeAtLocation(t);
-    const s = type?.getSymbol?.() ?? type?.symbol;
-    return s ? this._resolveAlias(s) : undefined;
+    const viaExpression = this._symbolAtNodeSafe(t.expression);
+    let result: any;
+    if (viaExpression) {
+      result = this._resolveAlias(viaExpression);
+    } else {
+      const type = this.checker.getTypeAtLocation(t);
+      const s = type?.getSymbol?.() ?? type?.symbol;
+      result = s ? this._resolveAlias(s) : undefined;
+    }
+    this.heritageSymbols.set(t, result);
+    return result;
   }
 
   /** `checker.getSymbolAtLocation` that tolerates local-only / missing nodes. */
@@ -1225,16 +1236,14 @@ export class Assembler {
       );
     }
 
-    if (decl.kind !== SyntaxKind.EnumDeclaration) {
-      this._verifySupertypes(decl);
-    }
-
     if (decl.kind === SyntaxKind.EnumDeclaration) {
       this._visitEnum(sym, decl, fqn, jsiiType);
     } else if (decl.kind === SyntaxKind.InterfaceDeclaration) {
       this._visitInterface(sym, decl, name, jsiiType);
+      this._verifySupertypes(decl);
     } else {
       this._visitClass(sym, decl, jsiiType);
+      this._verifySupertypes(decl);
     }
     this.types[fqn] = jsiiType as spec.Type;
   }
@@ -1250,7 +1259,12 @@ export class Assembler {
       );
     }
     for (const memberDecl of decl.members ?? []) {
-      if (this.checker.getConstantValue(memberDecl) === undefined) {
+      // Literal initializers (and auto-numbered members) are constant; only the
+      // others need the checker to evaluate them.
+      if (
+        !this._isLiteralEnumInitializer(memberDecl.initializer) &&
+        this.checker.getConstantValue(memberDecl) === undefined
+      ) {
         this._diagnostics.push(JsiiDiagnostic.JSII_1012_ONLY_CONST_ENUM_MEMBERS.create(memberDecl));
       }
     }
@@ -2339,7 +2353,7 @@ export class Assembler {
       const args = type.isTypeReference() ? this.checker.getTypeArguments(type) : [];
       return {
         collection: {
-          elementtype: this._typeReference(args[0], undefined, typeNode?.elementType ?? typeNode?.typeArguments?.[0], {
+          elementtype: this._typeReference(args[0], undefined, undefined, {
             declaration: use?.declaration,
             purpose: 'list element type',
           }),
@@ -2864,6 +2878,23 @@ export class Assembler {
     }
   }
 
+  private _isLiteralEnumInitializer(init: any): boolean {
+    const { SyntaxKind } = this.ts;
+    if (init == null) {
+      return true;
+    }
+    switch (init.kind) {
+      case SyntaxKind.NumericLiteral:
+      case SyntaxKind.StringLiteral:
+      case SyntaxKind.NoSubstitutionTemplateLiteral:
+        return true;
+      case SyntaxKind.PrefixUnaryExpression:
+        return init.operand?.kind === SyntaxKind.NumericLiteral;
+      default:
+        return false;
+    }
+  }
+
   /** JSII1004: two enum members with the same initializer. */
   private _verifyNoDuplicateEnumValues(decl: any): void {
     const sf = decl.getSourceFile();
@@ -2893,10 +2924,14 @@ export class Assembler {
   /** JSII5011: a type named like a submodule of the same namespace. */
   private _verifySubmoduleNameConflicts(jsiiType: any, decl: any): void {
     const typeFqnPrefix = jsiiType.fqn.slice(0, jsiiType.fqn.length - jsiiType.name.length - 1);
-    for (const [submoduleFqn, exportSym] of this.submoduleSymbols) {
-      if (typeFqnPrefix !== submoduleFqn.slice(0, submoduleFqn.lastIndexOf('.'))) {
-        continue;
+    if (this.submodulesByParent == null) {
+      this.submodulesByParent = new Map();
+      for (const [submoduleFqn, exportSym] of this.submoduleSymbols) {
+        const parent = submoduleFqn.slice(0, submoduleFqn.lastIndexOf('.'));
+        this.submodulesByParent.set(parent, [...(this.submodulesByParent.get(parent) ?? []), exportSym]);
       }
+    }
+    for (const exportSym of this.submodulesByParent.get(typeFqnPrefix) ?? []) {
       const name = exportSym.name;
       const candidates = Array.from(new Set([name, camel(name), pascal(name), snake(name)]));
       if (candidates.some((candidate) => candidate === jsiiType.name)) {
@@ -3320,20 +3355,36 @@ export class Assembler {
     const { SyntaxKind, ast } = this.ts;
     for (const clause of decl.heritageClauses ?? []) {
       for (const node of clause.types ?? []) {
-        const parentType = this.checker.getTypeAtLocation(node);
-        const parentSym = parentType?.getSymbol?.();
+        // The heritage symbols were resolved while visiting the class; interfaces
+        // resolve them here (one request per entry, instead of a type request).
+        const parentSym = this._heritageBaseSymbol(node);
         if (parentSym == null) {
           continue;
         }
-        const badDecl = (parentSym.declarations ?? [])
-          .map((h: any) => h.resolve(this.project))
-          .find(
-            (d: any) =>
-              d != null &&
-              d.kind !== SyntaxKind.ClassDeclaration &&
-              d.kind !== SyntaxKind.InterfaceDeclaration &&
-              d.kind !== SyntaxKind.ModuleDeclaration,
-          );
+        let badDecl: any;
+        for (const h of parentSym.declarations ?? []) {
+          const d = h.resolve(this.project);
+          if (
+            d == null ||
+            d.kind === SyntaxKind.ClassDeclaration ||
+            d.kind === SyntaxKind.InterfaceDeclaration ||
+            d.kind === SyntaxKind.ModuleDeclaration
+          ) {
+            continue;
+          }
+          if (d.kind === SyntaxKind.TypeAliasDeclaration) {
+            // Classic reported the declaration of the aliased type's symbol: the
+            // mapped type / type literal node (unions and intersections have no
+            // symbol and were not reported).
+            if (d.type?.kind === SyntaxKind.MappedType || d.type?.kind === SyntaxKind.TypeLiteral) {
+              badDecl = d.type;
+              break;
+            }
+            continue;
+          }
+          badDecl = d;
+          break;
+        }
         if (badDecl != null) {
           this._diagnostics.push(
             JsiiDiagnostic.JSII_3004_INVALID_SUPERTYPE.create(
