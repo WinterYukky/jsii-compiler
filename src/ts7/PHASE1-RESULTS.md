@@ -1524,8 +1524,7 @@ aws_stepfunctions.CfnStateMachineProps.properties[tags]
 ```
 
 Full machine-readable list with ref/gen values: `docs/upstream/strict-exclusions-aws-cdk-lib-54bf754.json`
-(also `s3://alphaface-compile-transfer-tmp/lege-tsgo-poc/strict/strict-exclusions-54bf754.json`,
-with `ref-cdk.json` / `gen-cdk-54bf754.json` next to it).
+(the raw `ref-cdk.json` / `gen-cdk-54bf754.json` assemblies are archived off-repo, available on request).
 
 Wall-clock of the TS7 compiler on aws-cdk-lib during the loop: 57.5 / 61.3 / 60.7 / 60.9 / 63.1 / 63.4 s
 (c7i.4xlarge, type check + emit, `--strip-deprecated --compress-assembly`).
@@ -1572,9 +1571,8 @@ Notes:
 - Earlier figures (54 s vs 106 s on a c7i.8xlarge with an older classic reference; 60-63 s on a
   c7i.4xlarge without a same-box classic run) are superseded by this table for the PR body.
 
-Artifacts: `s3://alphaface-compile-transfer-tmp/lege-tsgo-poc/perf3c/<box>/` (`time-*.txt`,
-`perf-summary.txt`, `jsii-classic-1.json`, `jsii-ts7-1.json`), script `ec2-perf-3c.sh` and the
-cgroup re-measurement `cg.sh` next to it.
+Artifacts (`time-*.txt`, `perf-summary.txt`, `jsii-classic-1.json`, `jsii-ts7-1.json`, the
+`ec2-perf-3c.sh` script and the cgroup re-measurement `cg.sh`) are archived off-repo, available on request.
 
 ## Phase 5G — spin-poll on small hosts: fixed, burstable, 2 vCPU (closed)
 
