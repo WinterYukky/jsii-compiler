@@ -1637,11 +1637,6 @@ export class Assembler {
         if (ownerId == null || ownerId !== effectiveCtorOwnerId) {
           continue;
         }
-        // Classic never visited the parameters of a private constructor, so its
-        // parameter properties are neither listed nor validated.
-        if ((pDecl.parent.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.PrivateKeyword)) {
-          continue;
-        }
       } else if (owner !== decl) {
         // Resolve the *declaring* type of this member via the owner declaration
         // node's type symbol. NOTE: do NOT use `p.getParent()` here — for a member
@@ -1663,7 +1658,9 @@ export class Assembler {
       }
       // Hidden members are skipped; the `@internal` / `_` naming rules are
       // validated on the members declared by this type (and its erased bases).
-      if (this._isPrivateOrInternal(p, pDecl)) {
+      // Classic checked constructor parameter properties without validating
+      // their names.
+      if (this._isPrivateOrInternal(p, isParamProp ? undefined : pDecl)) {
         continue;
       }
       // Stripping applies to the members the classic assembler listed on this type
@@ -2419,6 +2416,10 @@ export class Assembler {
       return this._hiddenTypeReference(sym, use);
     }
     if (!sym) {
+      // Classic `_tryMakePrimitiveType`: an object type without a symbol is `json`.
+      if (f & TypeFlags.Object) {
+        return { primitive: 'json' };
+      }
       this._diagnostics.push(JsiiDiagnostic.JSII_1001_TYPE_HAS_NO_SYMBOL.create(use?.declaration));
     }
     return { primitive: 'any' };
