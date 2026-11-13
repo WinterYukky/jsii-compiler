@@ -299,6 +299,8 @@ export class Assembler {
   private submodulesByParent?: Map<string, any[]>;
   /** Resolved symbols of heritage clause entries (`extends X` / `implements X`), by node. */
   private readonly heritageSymbols = new Map<any, any>();
+  /** Symbol ids of the types declared by class/interface declaration nodes (member owners), by node. */
+  private readonly ownerSymbolIds = new Map<any, unknown>();
 
   public constructor(ts: TypeScriptApi, project: TypeScriptProject, private readonly options: AssemblerOptions) {
     this.ts = ts;
@@ -1645,9 +1647,18 @@ export class Assembler {
         continue;
       }
       const isParamProp = pDecl.kind === SyntaxKind.Parameter;
+      // Hidden members are skipped. The `@internal` / `_` naming rules are only
+      // validated on the members declared by this type (and its erased bases), so
+      // the declaring type is looked up for a hidden member only when such a
+      // diagnostic is possible. Classic checked constructor parameter properties
+      // without validating their names.
+      const hidden = this._isPrivateOrInternal(p);
+      if (hidden && (isParamProp || !this._namingDiagnosticPossible(p))) {
+        continue;
+      }
       const owner = isParamProp ? pDecl.parent?.parent : pDecl.parent;
       if (isParamProp) {
-        const ownerId = owner === decl ? sym?.id : this.checker.getTypeAtLocation(owner)?.getSymbol?.()?.id;
+        const ownerId = owner === decl ? sym?.id : this._ownerSymbolId(owner);
         if (ownerId == null || ownerId !== effectiveCtorOwnerId) {
           continue;
         }
@@ -1657,8 +1668,7 @@ export class Assembler {
         // obtained from getPropertiesOfType(type) that returns the *queried* type
         // (membership), not the declaring type, which mis-classifies inherited
         // members as own. getTypeAtLocation(owner) gives the declaring type.
-        const ownerTypeSym = owner ? this.checker.getTypeAtLocation(owner)?.getSymbol?.() : undefined;
-        const ownerId = ownerTypeSym?.id;
+        const ownerId = this._ownerSymbolId(owner);
         const isOwn = ownerId != null && ownerId === sym?.id;
         const isErasedBase = ownerId != null && erasedBaseSymIds.has(ownerId);
         if (!isOwn && !isErasedBase) {
@@ -1670,11 +1680,8 @@ export class Assembler {
           continue;
         }
       }
-      // Hidden members are skipped; the `@internal` / `_` naming rules are
-      // validated on the members declared by this type (and its erased bases).
-      // Classic checked constructor parameter properties without validating
-      // their names.
-      if (this._isPrivateOrInternal(p, isParamProp ? undefined : pDecl)) {
+      if (hidden) {
+        this._isPrivateOrInternal(p, pDecl);
         continue;
       }
       // Stripping applies to the members the classic assembler listed on this type
@@ -1709,21 +1716,27 @@ export class Assembler {
         if (sp.name === 'prototype') {
           continue;
         }
-        const spDecl0 = sp.declarations?.[0]?.resolve(this.project);
-        if (
-          this._isPrivateOrInternal(
-            sp,
-            spDecl0 && this._isOwnOrErasedDeclaration(spDecl0, decl, sym, erasedBaseSymIds) ? spDecl0 : undefined,
-          )
-        ) {
-          continue;
-        }
         const spDecl = sp.declarations?.[0]?.resolve(this.project);
         if (!spDecl) {
           continue;
         }
+        const hidden = this._isPrivateOrInternal(sp);
+        if (hidden && !this._namingDiagnosticPossible(sp)) {
+          continue;
+        }
+        // Same declaring-type logic as the instance loop: statics declared on
+        // an *erased* (private/internal/unexported) base are re-listed on this
+        // type (strada blends erased-base declarations into the member walk);
+        // statics declared on an exported/foreign named base are not.
+        const ownOrErased = this._isOwnOrErasedDeclaration(spDecl, decl, sym, erasedBaseSymIds);
+        if (hidden) {
+          if (ownOrErased) {
+            this._isPrivateOrInternal(sp, spDecl);
+          }
+          continue;
+        }
         if (this._shouldStrip(sp, `${jsiiType.fqn}#${sp.name}`)) {
-          if (this._isOwnOrErasedDeclaration(spDecl, decl, sym, erasedBaseSymIds)) {
+          if (ownOrErased) {
             this._verifyMemberName(sp, spDecl, (sp.flags & SymbolFlags.Method) !== 0 ? 'method' : 'property');
           }
           if ((sp.flags & SymbolFlags.Method) !== 0) {
@@ -1733,17 +1746,8 @@ export class Assembler {
           }
           continue;
         }
-        if (spDecl.parent !== decl) {
-          // Same declaring-type logic as the instance loop: statics declared on
-          // an *erased* (private/internal/unexported) base are re-listed on this
-          // type (strada blends erased-base declarations into the member walk);
-          // statics declared on an exported/foreign named base are not.
-          const ownerTypeSym = spDecl.parent ? this.checker.getTypeAtLocation(spDecl.parent)?.getSymbol?.() : undefined;
-          const ownerId = ownerTypeSym?.id;
-          const isOwn = ownerId != null && ownerId === sym?.id;
-          if (!isOwn && !(ownerId != null && erasedBaseSymIds.has(ownerId))) {
-            continue;
-          }
+        if (!ownOrErased) {
+          continue;
         }
         if ((spDecl.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.PrivateKeyword)) {
           continue;
@@ -2788,8 +2792,28 @@ export class Assembler {
     if (owner === typeDecl) {
       return true;
     }
-    const ownerId = owner ? this.checker.getTypeAtLocation(owner)?.getSymbol?.()?.id : undefined;
+    const ownerId = this._ownerSymbolId(owner);
     return ownerId != null && (ownerId === typeSym?.id || erasedBaseSymIds.has(ownerId));
+  }
+
+  /** The symbol id of the type a class/interface declaration node declares (one checker request per node). */
+  private _ownerSymbolId(owner: any): unknown {
+    if (owner == null) {
+      return undefined;
+    }
+    if (!this.ownerSymbolIds.has(owner)) {
+      this.ownerSymbolIds.set(owner, this.checker.getTypeAtLocation(owner)?.getSymbol?.()?.id);
+    }
+    return this.ownerSymbolIds.get(owner);
+  }
+
+  /** Whether `_isPrivateOrInternal(sym, decl)` could report JSII8005/JSII8006 for this symbol. */
+  private _namingDiagnosticPossible(sym: any): boolean {
+    if (sym.name.startsWith('__')) {
+      return false;
+    }
+    const hasInternalJsDocTag = this._jsDocTags(sym).some((t: any) => t.name === 'internal');
+    return hasInternalJsDocTag !== sym.name.startsWith('_');
   }
 
   /** JSII5019 (member named like its type), JSII5016 (prohibited name), JSII5018 (reserved word). */
@@ -2859,6 +2883,11 @@ export class Assembler {
       }
       const valueParam = setter.parameters?.[0];
       if (valueParam?.type == null) {
+        continue;
+      }
+      // Same annotation text in the same scope denotes the same type (the usual
+      // getter/setter pair); only differing annotations need the checker.
+      if (getterDecl.type != null && valueParam.type.getText() === getterDecl.type.getText()) {
         continue;
       }
       const paramType = this.checker.getTypeFromTypeNode(valueParam.type);
