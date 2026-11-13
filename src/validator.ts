@@ -479,13 +479,13 @@ function _defaultValidations(): ValidationFunction[] {
         if (expParam.optional !== actParam.optional) {
           diagnostic(
             JsiiDiagnostic.JSII_5008_OVERRIDE_CHANGES_PARAM_OPTIONAL.create(
-              actParamNode?.questionToken ?? actParamNode?.type ?? declarationName(actParamNode),
+              questionTokenOf(actParamNode) ?? actParamNode?.type ?? declarationName(actParamNode),
               label,
               action,
               actParam,
               expParam,
             ).maybeAddRelatedInformation(
-              expParamNode?.questionToken ?? expParamNode?.type ?? declarationName(expParamNode),
+              questionTokenOf(expParamNode) ?? expParamNode?.type ?? declarationName(expParamNode),
               'The implemented declaration is here.',
             ),
           );
@@ -571,13 +571,13 @@ function _defaultValidations(): ValidationFunction[] {
       if (expected.optional !== actual.optional) {
         diagnostic(
           JsiiDiagnostic.JSII_5009_OVERRIDE_CHANGES_PROP_OPTIONAL.create(
-            actualNode?.questionToken ?? actualNode?.type ?? declarationName(actualNode),
+            questionTokenOf(actualNode) ?? actualNode?.type ?? declarationName(actualNode),
             label,
             action,
             actual.optional,
             expected.optional,
           ).maybeAddRelatedInformation(
-            expectedNode?.questionToken ?? expectedNode?.type ?? declarationName(expectedNode),
+            questionTokenOf(expectedNode) ?? expectedNode?.type ?? declarationName(expectedNode),
             'The implemented declaration is here.',
           ),
         );
@@ -845,4 +845,15 @@ function declarationName(decl: any): any {
 /** The TypeScript 7 API (enums and AST helpers), loaded once. */
 function tsApi(): ReturnType<typeof loadTypeScriptApi> {
   return loadTypeScriptApi();
+}
+
+/** The `?` token of a property/parameter declaration (`postfixToken` on the TypeScript 7 AST). */
+function questionTokenOf(node: any): any {
+  if (node == null) {
+    return undefined;
+  }
+  if (node.questionToken != null) {
+    return node.questionToken;
+  }
+  return node.postfixToken?.kind === tsApi().SyntaxKind.QuestionToken ? node.postfixToken : undefined;
 }

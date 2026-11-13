@@ -189,3 +189,38 @@ function formatCodeSpan(
   }
   return context;
 }
+
+/**
+ * Sorts diagnostics by file, position, length, code and message, and drops the
+ * duplicates (same as `ts.sortAndDeduplicateDiagnostics`, which the classic
+ * compiler applied to its output).
+ */
+export function sortAndDeduplicateDiagnostics<T extends Diagnostic>(diagnostics: readonly T[]): T[] {
+  const compare = (l: T, r: T): number => {
+    const byFile = (l.file?.fileName ?? '').localeCompare(r.file?.fileName ?? '');
+    if (byFile !== 0) {
+      return byFile;
+    }
+    const byStart = (l.start ?? -1) - (r.start ?? -1);
+    if (byStart !== 0) {
+      return byStart;
+    }
+    const byLength = (l.length ?? -1) - (r.length ?? -1);
+    if (byLength !== 0) {
+      return byLength;
+    }
+    const byCode = l.code - r.code;
+    if (byCode !== 0) {
+      return byCode;
+    }
+    const byMessage = l.messageText.localeCompare(r.messageText);
+    if (byMessage !== 0) {
+      return byMessage;
+    }
+    const lr = (l as any).relatedInformation?.length ?? 0;
+    const rr = (r as any).relatedInformation?.length ?? 0;
+    return lr - rr;
+  };
+  const sorted = [...diagnostics].sort(compare);
+  return sorted.filter((d, i) => i === 0 || compare(sorted[i - 1], d) !== 0);
+}

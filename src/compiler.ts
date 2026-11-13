@@ -9,7 +9,7 @@ import * as log4js from 'log4js';
 import { Assembler } from './assembler';
 import { findDependencyDirectory } from './common/find-utils';
 import { CompilerHost } from './compiler-host';
-import { Diagnostic, DiagnosticCategory } from './diagnostic';
+import { Diagnostic, DiagnosticCategory, sortAndDeduplicateDiagnostics } from './diagnostic';
 import { emitProject } from './emitter';
 import { JsiiDiagnostic } from './jsii-diagnostic';
 import * as literate from './literate';
@@ -155,10 +155,11 @@ export class Compiler {
       LOG.info(`assembled ${result.typeCount} types, emitted ${result.emittedFiles.length} files`);
     }
 
-    const hasWarnings = result.diagnostics.some((d) => d.category === 0 /* Warning */);
+    const diagnostics = sortAndDeduplicateDiagnostics(result.diagnostics);
+    const hasWarnings = diagnostics.some((d) => d.category === DiagnosticCategory.Warning);
     return {
       emitSkipped: result.emitSkipped || (this.options.failOnWarnings === true && hasWarnings),
-      diagnostics: result.diagnostics,
+      diagnostics,
       emittedFiles: result.emittedFiles,
     };
   }
@@ -493,7 +494,10 @@ export function buildProject(options: BuildProjectOptions): BuildProjectResult {
       };
     }
     const jsiiDiagnostics = [...assembler.diagnostics];
-    if (jsiiDiagnostics.some((d) => d.category === DiagnosticCategory.Error)) {
+    // Like the classic compiler, where the deprecated-remover reported JSII3999
+    // after assembling and the validator still ran, that code does not stop the
+    // validation.
+    if (jsiiDiagnostics.some((d) => d.category === DiagnosticCategory.Error && d.jsiiCode !== 3999)) {
       return {
         typeCount: 0,
         emittedFiles: [],
@@ -509,7 +513,7 @@ export function buildProject(options: BuildProjectOptions): BuildProjectResult {
     if (validation.usedFeatures?.length) {
       assembly.usedFeatures = Array.from(new Set([...(assembly.usedFeatures ?? []), ...validation.usedFeatures])).sort();
     }
-    if (validation.emitSkipped) {
+    if (validation.emitSkipped || jsiiDiagnostics.some((d) => d.category === DiagnosticCategory.Error)) {
       return {
         typeCount: 0,
         emittedFiles: [],
