@@ -1637,6 +1637,11 @@ export class Assembler {
         if (ownerId == null || ownerId !== effectiveCtorOwnerId) {
           continue;
         }
+        // Classic never visited the parameters of a private constructor, so its
+        // parameter properties are neither listed nor validated.
+        if ((pDecl.parent.modifiers ?? []).some((x: any) => x.kind === SyntaxKind.PrivateKeyword)) {
+          continue;
+        }
       } else if (owner !== decl) {
         // Resolve the *declaring* type of this member via the owner declaration
         // node's type symbol. NOTE: do NOT use `p.getParent()` here — for a member
@@ -1664,6 +1669,8 @@ export class Assembler {
       // Stripping applies to the members the classic assembler listed on this type
       // (own and erased-base members), hence after the ownership check above.
       if (this._shouldStrip(p, `${jsiiType.fqn}#${p.name}`)) {
+        // Classic validated the member names before --strip-deprecated removed the member.
+        this._verifyMemberName(p, pDecl, (p.flags & SymbolFlags.Method) !== 0 ? 'method' : 'property');
         if ((p.flags & SymbolFlags.Method) !== 0) {
           strippedMethods = true;
         } else {
@@ -1700,16 +1707,19 @@ export class Assembler {
         ) {
           continue;
         }
+        const spDecl = sp.declarations?.[0]?.resolve(this.project);
+        if (!spDecl) {
+          continue;
+        }
         if (this._shouldStrip(sp, `${jsiiType.fqn}#${sp.name}`)) {
+          if (this._isOwnOrErasedDeclaration(spDecl, decl, sym, erasedBaseSymIds)) {
+            this._verifyMemberName(sp, spDecl, (sp.flags & SymbolFlags.Method) !== 0 ? 'method' : 'property');
+          }
           if ((sp.flags & SymbolFlags.Method) !== 0) {
             strippedMethods = true;
           } else {
             strippedProps = true;
           }
-          continue;
-        }
-        const spDecl = sp.declarations?.[0]?.resolve(this.project);
-        if (!spDecl) {
           continue;
         }
         if (spDecl.parent !== decl) {
@@ -2286,6 +2296,11 @@ export class Assembler {
     if (f & TypeFlags.Never) {
       this._diagnostics.push(JsiiDiagnostic.JSII_1007_NEVER_TYPE.create(use?.declaration));
       return { primitive: 'any' };
+    }
+    if (f & TypeFlags.TypeParameter) {
+      // Classic resolved every type through `getApparentType`: a type parameter
+      // becomes its constraint's apparent type (`unknown`, hence `any`, when unconstrained).
+      return this._typeReference(this.checker.getApparentType(type), optionalOut, undefined, use);
     }
     if (f & TypeFlags.EnumLike) {
       const s = type.getSymbol();
