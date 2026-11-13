@@ -783,7 +783,9 @@ export class Assembler {
             continue;
           }
           moduleExportedAs.set(sym.id, e);
-          if (e.name !== camel(e.name) && e.name !== snake(e.name)) {
+          // Classic: the casing rule applies to submodules backed by a module file
+          // (`export * as foo from './foo'`), not to inline `namespace` declarations.
+          if (kind === SyntaxKind.SourceFile && e.name !== camel(e.name) && e.name !== snake(e.name)) {
             const eDecl = e.declarations?.[0]?.resolve(this.project);
             this._diagnostics.push(JsiiDiagnostic.JSII_8004_SUBMOULE_NAME_CASING.create(eDecl?.name ?? eDecl, e.name));
           }
@@ -2641,10 +2643,11 @@ export class Assembler {
    */
   private _isPrivate(sym: any): boolean {
     const { SyntaxKind, ModifierFlags, ast } = this.ts;
-    if (sym.name.startsWith('#')) {
+    const decls: any[] = (sym.declarations ?? []).map((h: any) => h.resolve(this.project)).filter(Boolean);
+    // ECMAScript private names (`#name`; the symbol is named `__#<n>@#name` here).
+    if (sym.name.startsWith('#') || decls.some((decl) => decl.name?.kind === SyntaxKind.PrivateIdentifier)) {
       return true;
     }
-    const decls: any[] = (sym.declarations ?? []).map((h: any) => h.resolve(this.project)).filter(Boolean);
     const typeDeclarationKinds = [SyntaxKind.ClassDeclaration, SyntaxKind.InterfaceDeclaration, SyntaxKind.EnumDeclaration];
     const isInternalSymbolName = sym.name.startsWith('__');
     if (!isInternalSymbolName && (decls.length === 0 || typeDeclarationKinds.includes(decls[0].kind))) {
