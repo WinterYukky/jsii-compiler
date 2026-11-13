@@ -160,6 +160,23 @@ export class CompilerHost {
     // (opt-in via JSII_TS7_TIMING; negligible overhead but off by default).
     const collectTiming = !!process.env.JSII_TS7_TIMING;
     const api = new ts.API({ cwd: projectRoot, collectTiming });
+    if (collectTiming) {
+      // Per-method request counts (printed with the timing summary): which API
+      // calls the assembler is spending its round-trips on.
+      const client = api.client;
+      const counts: Record<string, number> = {};
+      const original = client.apiRequest.bind(client);
+      client.apiRequest = (method: string, params: any) => {
+        if (method === 'batchRequests') {
+          for (const r of params?.requests ?? []) {
+            counts[`batch:${r.method}`] = (counts[`batch:${r.method}`] ?? 0) + 1;
+          }
+        }
+        counts[method] = (counts[method] ?? 0) + 1;
+        return original(method, params);
+      };
+      api.requestCounts = counts;
+    }
     const snapshot = api.createSnapshot({ openProjects: [tsconfigPath] });
 
     return new CompilerHost(ts, api, snapshot, tsconfigPath);
@@ -175,7 +192,7 @@ export class CompilerHost {
   /** RPC timing info (requestCount/bytes) when JSII_TS7_TIMING is enabled. */
   public getTimingInfo(): any {
     try {
-      return this.api.getTimingInfo();
+      return { ...this.api.getTimingInfo(), requestCounts: this.api.requestCounts };
     } catch {
       return undefined;
     }

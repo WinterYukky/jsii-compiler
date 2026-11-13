@@ -573,6 +573,14 @@ export function buildProject(options: BuildProjectOptions): BuildProjectResult {
             `sent=${t.totals.bytesSent} recv=${t.totals.bytesReceived}`,
         );
       }
+      if (t?.requestCounts) {
+        const top = Object.entries(t.requestCounts as Record<string, number>)
+          .sort(([, a], [, b]) => b - a)
+          .slice(0, 40)
+          .map(([m, n]) => `${m}=${n}`)
+          .join(' ');
+        LOG.info(`ts request counts: ${top}`);
+      }
     }
     host.close();
   }
