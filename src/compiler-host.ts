@@ -35,7 +35,13 @@ export interface TypeScriptApi {
   readonly SymbolFlags: any;
   readonly TypeFlags: any;
   readonly SyntaxKind: any;
+  readonly ModifierFlags: any;
   /* eslint-enable @typescript-eslint/naming-convention */
+  /**
+   * The `#typescript/ast` module: the client-side AST classes and helpers
+   * (`getJSDocTags`, `getNameOfDeclaration`, the `is*` predicates, ...).
+   */
+  readonly ast: any;
   /** Combines request generators so `api.batch(all(...))` issues them in one round-trip. */
   readonly all: (...generators: any[]) => any;
   /** Directory of the TypeScript package the API was loaded from. */
@@ -118,6 +124,8 @@ export function loadTypeScriptApi(): TypeScriptApi {
     SymbolFlags: apiModule.SymbolFlags,
     TypeFlags: apiModule.TypeFlags,
     SyntaxKind: astModule.SyntaxKind,
+    ModifierFlags: astModule.ModifierFlags,
+    ast: astModule,
     all: apiModule.all,
     packageDir,
     version,

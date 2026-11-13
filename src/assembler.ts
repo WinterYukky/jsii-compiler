@@ -22,14 +22,18 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 import * as spec from '@jsii/spec';
+import { camel, pascal, snake } from 'case';
 
 import { findDependencyDirectory } from './common/find-utils';
 import { symbolIdentifier } from './common/symbol-id';
 import { TypeScriptApi, TypeScriptProject } from './compiler-host';
+import { Directives } from './directives';
 import { normalizeConfigPath } from './helpers';
 import { JsiiDiagnostic } from './jsii-diagnostic';
 import * as literate from './literate';
+import * as bindings from './node-bindings';
 import { validateTargets, type ProjectInfo } from './project-info';
+import { isReservedName } from './reserved-words';
 import { isAllowedCovariantSubtype } from './type-analysis';
 import { createTypeResolver } from './type-reference';
 import { SHORT_VERSION, VERSION } from './version';
@@ -249,6 +253,8 @@ export class Assembler {
   }
 
   private readonly _diagnostics = new Array<JsiiDiagnostic>();
+  /** The type whose members are being visited (for member-name diagnostics). */
+  private currentType?: any;
 
   /** The jsii features the assembly makes use of (classic `usedFeatures`). */
   private readonly usedFeatures = new Set<spec.JsiiFeature>();
@@ -282,6 +288,10 @@ export class Assembler {
   // DeprecatedRemover deletes post-assembly WITHOUT folding its members into
   // subclasses — so member re-listing must not treat it as an erased base.
   private readonly strippedTypeSymIds = new Set<unknown>();
+  /** FQNs of the types removed by --strip-deprecated (for JSII3999 on their remaining uses). */
+  private readonly strippedFqns = new Set<string>();
+  /** Submodule export symbols by submodule FQN (for JSII5011 related information). */
+  private readonly submoduleSymbols = new Map<string, any>();
 
   public constructor(ts: TypeScriptApi, project: TypeScriptProject, private readonly options: AssemblerOptions) {
     this.ts = ts;
@@ -327,6 +337,7 @@ export class Assembler {
     }
 
     this._propagateDatatype();
+    this._validateTypes();
 
     return this._buildAssembly();
   }
@@ -364,25 +375,14 @@ export class Assembler {
    */
   private _isIgnored(sym: any): boolean {
     const decls: any[] = sym.declarations ?? [];
-    if (decls.length === 0 || !this._jsDocTags(sym).some((t: any) => isIgnoreDirective(t))) {
+    // Cheap pre-check on the aggregated tags: without a `@jsii` tag there is
+    // nothing to parse (and no directive diagnostic to report).
+    if (decls.length === 0 || !this._jsDocTags(sym).some((t: any) => t.name === 'jsii')) {
       return false;
     }
-    if (decls.length === 1) {
-      return true;
-    }
-    return decls.every((handle) => {
-      const block = this._leadingJsDocBlock(handle.resolve(this.project));
-      return block != null && this._jsDocLines(block).some((line) => /^@jsii\s+ignore(\s|$)/.test(line));
-    });
-
-    /** `@jsii ignore` (a `@jsii` tag whose directive text, on any of its lines, is `ignore`). */
-    function isIgnoreDirective(tag: any): boolean {
-      if (tag.name !== 'jsii') {
-        return false;
-      }
-      const text: string = typeof tag.text === 'string' ? tag.text : (tag.text ?? []).map((p: any) => p.text).join('');
-      return text.split(/[\n,]/).some((part) => part.trim().split(/\s+/)[0] === 'ignore');
-    }
+    return decls.every(
+      (handle) => Directives.of(handle.resolve(this.project), (diag) => this._diagnostics.push(diag)).ignore != null,
+    );
   }
 
   private _isDeprecated(sym: any): boolean {
@@ -703,11 +703,13 @@ export class Assembler {
         return fqn;
       }
     }
-    // Fallback for assemblies without symbolIds: a top-level type of that name.
+    // Fallback for assemblies without symbolIds: a top-level type of that name,
+    // or the only type of that name in any submodule of the dependency.
     if (this.externalDeps.get(dep)!.has(sym.name)) {
       return `${dep}.${sym.name}`;
     }
-    return undefined;
+    const candidates = Object.values(this.externalAssemblies.get(dep)?.types ?? {}).filter((t) => t.name === sym.name);
+    return candidates.length === 1 ? candidates[0].fqn : undefined;
   }
 
   // -------------------------------------------------------------------------
@@ -759,6 +761,11 @@ export class Assembler {
             continue;
           }
           visitedModules.add(key);
+          if (e.name !== camel(e.name) && e.name !== snake(e.name)) {
+            const eDecl = e.declarations?.[0]?.resolve(this.project);
+            this._diagnostics.push(JsiiDiagnostic.JSII_8004_SUBMOULE_NAME_CASING.create(eDecl?.name ?? eDecl, e.name));
+          }
+          this.submoduleSymbols.set(subFqn, e);
           this.submodules[subFqn] = this._submoduleSpec(e, sym, kind === SyntaxKind.SourceFile);
           const subDir = path.dirname(sym.declarations?.[0]?.path ?? moduleDir);
           collect(this.checker.getExportsOfModule(sym), subFqn, subDir);
@@ -845,6 +852,7 @@ export class Assembler {
     }
     if (this._shouldStrip(sym, fqn)) {
       this.strippedTypeSymIds.add(sym.id);
+      this.strippedFqns.add(fqn);
       return;
     }
     const decl = sym.declarations?.[0]?.resolve(this.project);
@@ -1159,6 +1167,17 @@ export class Assembler {
     if (symbolId) {
       jsiiType.symbolId = symbolId;
     }
+    bindings.setRelatedNode(jsiiType, decl);
+    this.currentType = jsiiType;
+
+    this._warnAboutReservedWords(sym);
+    this._verifySubmoduleNameConflicts(jsiiType, decl);
+    if (decl.kind !== SyntaxKind.InterfaceDeclaration && pascal(name) !== name) {
+      this._diagnostics.push(JsiiDiagnostic.JSII_8000_PASCAL_CASED_TYPE_NAMES.create(decl.name ?? decl, name));
+    }
+    for (const typeParam of decl.typeParameters ?? []) {
+      this._diagnostics.push(JsiiDiagnostic.JSII_1006_GENERIC_TYPE.create(typeParam));
+    }
 
     if (decl.kind === SyntaxKind.EnumDeclaration) {
       this._visitEnum(sym, decl, fqn, jsiiType);
@@ -1173,6 +1192,19 @@ export class Assembler {
   private _visitEnum(sym: any, decl: any, fqn: string, jsiiType: any): void {
     const { SyntaxKind } = this.ts;
     jsiiType.kind = 'enum';
+    if ((decl.modifiers ?? []).some((mod: any) => mod.kind === SyntaxKind.ConstKeyword)) {
+      this._diagnostics.push(
+        JsiiDiagnostic.JSII_1000_NO_CONST_ENUM.create(
+          decl.modifiers.find((mod: any) => mod.kind === SyntaxKind.ConstKeyword) ?? decl,
+        ),
+      );
+    }
+    for (const memberDecl of decl.members ?? []) {
+      if (this.checker.getConstantValue(memberDecl) === undefined) {
+        this._diagnostics.push(JsiiDiagnostic.JSII_1012_ONLY_CONST_ENUM_MEMBERS.create(memberDecl));
+      }
+    }
+    this._verifyNoDuplicateEnumValues(decl);
     const members: any[] = [];
     // strada derives enum members from the enum TYPE's union constituents
     // (`type.isUnion() ? type.types : [type]`), not from the declaration. For
@@ -1483,6 +1515,19 @@ export class Assembler {
       }
     }
 
+    // Member declarations the classic compiler flagged while walking the
+    // declaration: stray semicolons and index signatures.
+    const { ast } = this.ts;
+    for (const memberDecl of decl.members ?? []) {
+      if (ast.isSemicolonClassElement(memberDecl)) {
+        this._diagnostics.push(JsiiDiagnostic.JSII_9996_UNNECESSARY_TOKEN.create(memberDecl));
+      } else if (ast.isIndexSignatureDeclaration(memberDecl)) {
+        this._diagnostics.push(
+          JsiiDiagnostic.JSII_1999_UNSUPPORTED.create(memberDecl, { what: 'Index signatures', suggestInternal: true }),
+        );
+      }
+    }
+
     const instanceProps = this.checker.getPropertiesOfType(type);
     const staticTypeForPrefetch = !isInterface ? this.checker.getTypeOfSymbol(sym) : undefined;
     const staticPropsForPrefetch = staticTypeForPrefetch ? this.checker.getPropertiesOfType(staticTypeForPrefetch) : [];
@@ -1511,9 +1556,6 @@ export class Assembler {
     }
 
     for (const p of instanceProps) {
-      if (this._isInternal(p)) {
-        continue;
-      }
       const pDecl = p.declarations?.[0]?.resolve(this.project);
       if (!pDecl) {
         continue;
@@ -1547,6 +1589,11 @@ export class Assembler {
           continue;
         }
       }
+      // Hidden members are skipped; the `@internal` / `_` naming rules are
+      // validated on the members declared by this type (and its erased bases).
+      if (this._isPrivateOrInternal(p, pDecl)) {
+        continue;
+      }
       // Stripping applies to the members the classic assembler listed on this type
       // (own and erased-base members), hence after the ownership check above.
       if (this._shouldStrip(p, `${jsiiType.fqn}#${p.name}`)) {
@@ -1574,7 +1621,11 @@ export class Assembler {
 
     if (!isInterface) {
       for (const sp of staticPropsForPrefetch) {
-        if (sp.name === 'prototype' || this._isInternal(sp)) {
+        if (sp.name === 'prototype') {
+          continue;
+        }
+        const spDecl0 = sp.declarations?.[0]?.resolve(this.project);
+        if (this._isPrivateOrInternal(sp, spDecl0 && this._isOwnOrErasedDeclaration(spDecl0, decl, sym, erasedBaseSymIds) ? spDecl0 : undefined)) {
           continue;
         }
         if (this._shouldStrip(sp, `${jsiiType.fqn}#${sp.name}`)) {
@@ -1681,6 +1732,8 @@ export class Assembler {
     const { SyntaxKind } = this.ts;
     const sig = this.checker.getSignatureFromDeclaration(decl);
     const m: any = { locationInModule: this._locationOf(decl), name: msym.name };
+    bindings.setRelatedNode(m, decl);
+    this._verifyMemberName(msym, decl, 'method');
     if (isStatic) {
       m.static = true;
     }
@@ -1712,15 +1765,24 @@ export class Assembler {
           retNode = retNode?.typeArguments?.[0];
         }
       }
-      const ret = this._typeReference(retType, opt, retNode);
+      if (m.async && retType == null) {
+        this._diagnostics.push(JsiiDiagnostic.JSII_1002_UNSPECIFIED_PROMISE.create(decl.type ?? decl.name));
+      }
+      const ret = this._typeReference(retType, opt, retNode, {
+        declaration: decl.type ?? decl.name,
+        purpose: 'return type',
+        isThisType: retNode?.kind === SyntaxKind.ThisType,
+      });
       if (ret) {
         m.returns = opt.optional ? { optional: true, type: ret } : { type: ret };
       }
+      this._verifyConsecutiveOptionals(decl, m.parameters);
     }
     const d = this._visitMemberDocumentation(msym, decl);
     if (d) {
       m.docs = d;
     }
+    this._validateReferencedDocParams(m, msym, decl);
     return this._withDefaultDocs(m);
   }
 
@@ -1731,10 +1793,15 @@ export class Assembler {
     const p: any = {
       locationInModule: this._locationOf(decl),
       name: psym.name,
-      type: this._typeReference(t, opt, decl.type),
+      type: this._typeReference(t, opt, decl.type, { declaration: decl.type ?? decl.name, purpose: 'property type' }),
     };
+    bindings.setRelatedNode(p, decl);
+    this._verifyMemberName(psym, decl, 'property');
     const mods = decl.modifiers ?? [];
     const hasSetter = psym.declarations?.some((h: any) => h.kind === SyntaxKind.SetAccessor);
+    if (hasSetter) {
+      this._verifySeparateWriteType(psym, decl, p, opt);
+    }
     if (
       mods.some((x: any) => x.kind === SyntaxKind.ReadonlyKeyword) ||
       (decl.kind === SyntaxKind.GetAccessor && !hasSetter)
@@ -1788,7 +1855,15 @@ export class Assembler {
     const decl = prm.declarations?.[0]?.resolve(this.project);
     const t = decl ? this.checker.getTypeOfSymbolAtLocation(prm, decl) : undefined;
     const opt: { optional?: boolean } = {};
-    const p: any = { name: prm.name, type: this._typeReference(t, opt, decl?.type) };
+    const p: any = {
+      name: prm.name,
+      type: this._typeReference(t, opt, decl?.type, {
+        declaration: decl?.type ?? decl?.name,
+        purpose: 'parameter type',
+      }),
+    };
+    bindings.setRelatedNode(p, decl);
+    this._warnAboutReservedWords(prm);
     if (decl?.dotDotDotToken) {
       p.variadic = true;
       p.type = p.type?.collection?.elementtype ?? p.type;
@@ -2130,12 +2205,16 @@ export class Assembler {
     return isStdlibDeclPath(sym?.declarations?.[0]?.path ?? '');
   }
 
-  private _typeReference(type: any, optionalOut?: { optional?: boolean }, typeNode?: any): any {
+  private _typeReference(type: any, optionalOut?: { optional?: boolean }, typeNode?: any, use?: TypeUse): any {
     const { TypeFlags } = this.ts;
     if (!type) {
       return { primitive: 'any' };
     }
     const f = type.flags;
+    if (f & TypeFlags.Never) {
+      this._diagnostics.push(JsiiDiagnostic.JSII_1007_NEVER_TYPE.create(use?.declaration));
+      return { primitive: 'any' };
+    }
     if (f & TypeFlags.EnumLike) {
       const s = type.getSymbol();
       const parent = s?.getParent();
@@ -2167,14 +2246,28 @@ export class Assembler {
       return undefined;
     }
     if (type.isUnionType()) {
-      return this._unionTypeReference(type, optionalOut, typeNode);
+      return this._unionTypeReference(type, optionalOut, typeNode, use);
     }
     if (typeof type.isIntersectionType === 'function' && type.isIntersectionType()) {
-      return this._intersectionTypeReference(type);
+      return this._intersectionTypeReference(type, use);
     }
     if (this._isArrayType(type)) {
       const args = type.isTypeReference() ? this.checker.getTypeArguments(type) : [];
-      return { collection: { elementtype: this._typeReference(args[0]), kind: 'array' } };
+      return {
+        collection: {
+          elementtype: this._typeReference(args[0], undefined, typeNode?.elementType ?? typeNode?.typeArguments?.[0], {
+            declaration: use?.declaration,
+            purpose: 'list element type',
+          }),
+          kind: 'array',
+        },
+      };
+    }
+    if (typeof type.isTupleType === 'function' && type.isTupleType()) {
+      this._diagnostics.push(
+        JsiiDiagnostic.JSII_1999_UNSUPPORTED.create(use?.declaration, { what: 'Tuple types', alternative: 'arrays' }),
+      );
+      return { primitive: 'json' };
     }
     const sym = type.getSymbol();
     // Boxed standard-library wrapper types map to primitives (strada's
@@ -2203,12 +2296,72 @@ export class Assembler {
     }
     const indexInfos = this.checker.getIndexInfosOfType(type);
     if (indexInfos.length) {
-      return { collection: { elementtype: this._typeReference(indexInfos[0].valueType), kind: 'map' } };
+      const stringIndex = indexInfos.find((info: any) => (info.keyType?.flags ?? 0) & TypeFlags.StringLike);
+      if (stringIndex == null) {
+        this._diagnostics.push(
+          JsiiDiagnostic.JSII_1003_UNSUPPORTED_TYPE.create(use?.declaration, 'Only string-indexed map types are supported'),
+        );
+        return { collection: { elementtype: { primitive: 'any' }, kind: 'map' } };
+      }
+      return {
+        collection: {
+          elementtype: this._typeReference(stringIndex.valueType, undefined, undefined, {
+            declaration: use?.declaration,
+            purpose: 'map element type',
+          }),
+          kind: 'map',
+        },
+      };
+    }
+    if (sym && sym.name !== '__type' && sym.name !== '__object') {
+      // A named type that is not part of this assembly nor of a dependency's.
+      return this._hiddenTypeReference(sym, use);
+    }
+    if (!sym) {
+      this._diagnostics.push(JsiiDiagnostic.JSII_1001_TYPE_HAS_NO_SYMBOL.create(use?.declaration));
     }
     return { primitive: 'any' };
   }
 
-  private _unionTypeReference(type: any, optionalOut?: { optional?: boolean }, typeNode?: any): any {
+  /**
+   * A reference to a type that has no FQN: not exported from this assembly's
+   * entry point nor part of a dependency's assembly. Reported the way the classic
+   * `_getFQN` did (JSII3001 for private/`@internal`/unexported-from-file types,
+   * JSII3002 for types of a dependency that are not in its assembly); a type that
+   * is exported from its file but not reachable from the entry point gets an FQN
+   * under this assembly and is left for the validator (JSII3000).
+   */
+  private _hiddenTypeReference(sym: any, use: TypeUse | undefined): any {
+    const typeDeclaration = sym.declarations?.[0]?.resolve(this.project);
+    const declPath: string = sym.declarations?.[0]?.path ?? '';
+    const dep = this._dependencyOfPath(declPath);
+    if (dep != null) {
+      const fqn = `${dep}.${sym.name}`;
+      this._diagnostics.push(
+        JsiiDiagnostic.JSII_3002_USE_OF_UNEXPORTED_FOREIGN_TYPE.create(use?.declaration, fqn, use?.purpose ?? 'type', {
+          name: dep,
+        }).addRelatedInformationIf(typeDeclaration, 'The referenced type is declared here'),
+      );
+      return { fqn };
+    }
+    if (this._isPrivateOrInternal(sym)) {
+      this._diagnostics.push(
+        JsiiDiagnostic.JSII_3001_EXPOSED_INTERNAL_TYPE.create(
+          use?.declaration,
+          sym.name,
+          use?.isThisType ?? false,
+          use?.purpose ?? 'type',
+        ).addRelatedInformationIf(typeDeclaration, 'The referenced type is declared here'),
+      );
+    }
+    // Exported from its module, not from the entry point: the validator reports
+    // the dangling reference (JSII3000) with the FQN it would have had.
+    const qualified: string = this.checker.getFullyQualifiedName(sym) ?? sym.name;
+    const groups = /^"[^"]+"\.(.*)$/.exec(qualified);
+    return { fqn: `${this.assemblyName}.${groups ? groups[1] : qualified}` };
+  }
+
+  private _unionTypeReference(type: any, optionalOut?: { optional?: boolean }, typeNode?: any, use?: TypeUse): any {
     const { TypeFlags } = this.ts;
     const all = type.getTypes();
     const parts = all.filter((t: any) => !(t.flags & (TypeFlags.Undefined | TypeFlags.Null)));
@@ -2243,7 +2396,7 @@ export class Assembler {
           }
           continue;
         }
-        pushFlat(this._typeReference(tt, optionalOut, tn));
+        pushFlat(this._typeReference(tt, optionalOut, tn, use));
       }
       if (refs.length === 1) {
         return refs[0];
@@ -2255,7 +2408,7 @@ export class Assembler {
     const refs: any[] = [];
     const seen = new Set<string>();
     for (const p of parts) {
-      const r = this._typeReference(p, optionalOut);
+      const r = this._typeReference(p, optionalOut, undefined, use);
       const key = JSON.stringify(r);
       if (r && !seen.has(key)) {
         seen.add(key);
@@ -2274,11 +2427,11 @@ export class Assembler {
    * strada's `type.isIntersection()` branch: each constituent is turned into a
    * type reference, deduplicated.
    */
-  private _intersectionTypeReference(type: any): any {
+  private _intersectionTypeReference(type: any, use?: TypeUse): any {
     const refs: any[] = [];
     const seen = new Set<string>();
     for (const t of type.getTypes()) {
-      const r = this._typeReference(t);
+      const r = this._typeReference(t, undefined, undefined, use);
       if (!r) {
         continue;
       }
@@ -2401,6 +2554,461 @@ export class Assembler {
     return obj;
   }
 
+
+  // -------------------------------------------------------------------------
+  // validation while visiting (the checks the classic Assembler made inline)
+  // -------------------------------------------------------------------------
+
+  /** `getNameOfDeclaration(decl) ?? decl`, for placing a diagnostic on a declaration's name. */
+  private _nameNode(decl: any): any {
+    return decl == null ? undefined : this.ts.ast.getNameOfDeclaration(decl) ?? decl;
+  }
+
+  /** The first declaration of a symbol, resolved to a client-side node. */
+  private _declarationOf(sym: any): any {
+    return sym?.declarations?.[0]?.resolve(this.project);
+  }
+
+  /** The name node of a symbol's first declaration, or that declaration. */
+  private _nameOrDeclarationNode(sym: any): any {
+    return this._nameNode(this._declarationOf(sym));
+  }
+
+  private _warnAboutReservedWords(sym: any): void {
+    const reservingLanguages = isReservedName(sym.name);
+    if (reservingLanguages) {
+      this._diagnostics.push(
+        JsiiDiagnostic.JSII_5018_RESERVED_WORD.create(this._nameOrDeclarationNode(sym), sym.name, reservingLanguages),
+      );
+    }
+  }
+
+  /**
+   * Whether a symbol is private: a `#name`, a `private` member, or a type that is
+   * not exported from its module (the classic `_isPrivate`).
+   */
+  private _isPrivate(sym: any): boolean {
+    const { SyntaxKind, ModifierFlags, ast } = this.ts;
+    if (sym.name.startsWith('#')) {
+      return true;
+    }
+    const decls: any[] = (sym.declarations ?? []).map((h: any) => h.resolve(this.project)).filter(Boolean);
+    const typeDeclarationKinds = [SyntaxKind.ClassDeclaration, SyntaxKind.InterfaceDeclaration, SyntaxKind.EnumDeclaration];
+    const isInternalSymbolName = sym.name.startsWith('__');
+    if (!isInternalSymbolName && (decls.length === 0 || typeDeclarationKinds.includes(decls[0].kind))) {
+      let hasExport = false;
+      for (const decl of decls) {
+        if (ast.getCombinedModifierFlags(decl) & ModifierFlags.Export) {
+          hasExport = true;
+          break;
+        }
+        if (decl.parent?.kind === SyntaxKind.ModuleBlock) {
+          const modifiers = ast.getCombinedModifierFlags(decl.parent.parent);
+          if ((modifiers & ModifierFlags.Ambient) !== 0 && (modifiers & ModifierFlags.Export) !== 0) {
+            hasExport = true;
+            break;
+          }
+        }
+      }
+      if (!hasExport) {
+        return true;
+      }
+    }
+    return decls.some((decl) => (decl.modifiers ?? []).some((mod: any) => mod.kind === SyntaxKind.PrivateKeyword));
+  }
+
+  /**
+   * Whether a symbol is hidden from the type model (private, `@jsii ignore`d,
+   * `@internal` or `_`-prefixed); with a declaration, the `@internal`/`_` naming
+   * rules are validated (JSII8005 / JSII8006). Port of the classic
+   * `_isPrivateOrInternal`.
+   */
+  private _isPrivateOrInternal(sym: any, validateDeclaration?: any): boolean {
+    const hasInternalJsDocTag = this._jsDocTags(sym).some((t: any) => t.name === 'internal');
+    const hasInternalSymbolName = sym.name.startsWith('__');
+    const hasUnderscorePrefix = !hasInternalSymbolName && sym.name.startsWith('_');
+
+    if (this._isPrivate(sym)) {
+      return true;
+    }
+    if (this._isIgnored(sym)) {
+      return true;
+    }
+    if (!hasInternalJsDocTag && !hasUnderscorePrefix) {
+      return false;
+    }
+    if (validateDeclaration && !hasInternalSymbolName) {
+      if (!hasUnderscorePrefix) {
+        this._diagnostics.push(JsiiDiagnostic.JSII_8005_INTERNAL_UNDERSCORE.create(this._nameNode(validateDeclaration), sym.name));
+      }
+      if (!hasInternalJsDocTag) {
+        this._diagnostics.push(JsiiDiagnostic.JSII_8006_UNDERSCORE_INTERNAL.create(this._nameNode(validateDeclaration), sym.name));
+      }
+    }
+    return true;
+  }
+
+  /** Whether a member declaration belongs to the type being visited or to one of its erased bases. */
+  private _isOwnOrErasedDeclaration(memberDecl: any, typeDecl: any, typeSym: any, erasedBaseSymIds: Set<unknown>): boolean {
+    const owner = memberDecl.kind === this.ts.SyntaxKind.Parameter ? memberDecl.parent?.parent : memberDecl.parent;
+    if (owner === typeDecl) {
+      return true;
+    }
+    const ownerId = owner ? this.checker.getTypeAtLocation(owner)?.getSymbol?.()?.id : undefined;
+    return ownerId != null && (ownerId === typeSym?.id || erasedBaseSymIds.has(ownerId));
+  }
+
+  /** JSII5019 (member named like its type), JSII5016 (prohibited name), JSII5018 (reserved word). */
+  private _verifyMemberName(msym: any, decl: any, kind: 'method' | 'property'): void {
+    const owner = this.currentType;
+    if (owner && owner.name === pascal(msym.name)) {
+      const ownerDecl = bindings.getRelatedNode(owner);
+      this._diagnostics.push(
+        JsiiDiagnostic.JSII_5019_MEMBER_TYPE_NAME_CONFLICT.create(
+          decl.name ?? decl,
+          kind,
+          msym.name,
+          owner,
+        ).addRelatedInformationIf(ownerDecl?.name ?? ownerDecl, `The declaring ${owner.kind} is introduced here`),
+      );
+    }
+    if (PROHIBITED_MEMBER_NAMES.includes(msym.name.toLowerCase())) {
+      this._diagnostics.push(JsiiDiagnostic.JSII_5016_PROHIBITED_MEMBER_NAME.create(decl.name ?? decl, msym.name));
+      return;
+    }
+    this._warnAboutReservedWords(msym);
+  }
+
+  /** JSII3009: an optional parameter followed by a required one. */
+  private _verifyConsecutiveOptionals(node: any, parameters?: any[]): void {
+    if (!parameters) {
+      return;
+    }
+    const remaining = [...parameters].reverse();
+    while (remaining.length > 0) {
+      const current = remaining.pop()!;
+      if (current.optional) {
+        const offender = remaining.find((p) => !p.optional && !p.variadic);
+        if (offender == null) {
+          continue;
+        }
+        this._diagnostics.push(JsiiDiagnostic.JSII_3009_OPTIONAL_PARAMETER_BEFORE_REQUIRED.create(node, current, offender));
+        delete current.optional;
+      }
+    }
+  }
+
+  /** JSII7000: a `@param` tag that names no parameter of the method. */
+  private _validateReferencedDocParams(method: any, msym: any, decl: any): void {
+    const actualNames = new Set((method.parameters ?? []).map((p: any) => p.name));
+    for (const tag of this._jsDocTags(msym)) {
+      if (tag.name !== 'param') {
+        continue;
+      }
+      const text = typeof tag.text === 'string' ? tag.text : (tag.text ?? []).map((p: any) => p.text).join('');
+      const [param] = text.trim().split(/\s+/);
+      if (param && !actualNames.has(param)) {
+        this._diagnostics.push(JsiiDiagnostic.JSII_7000_NON_EXISTENT_PARAMETER.create(decl, method, param));
+      }
+    }
+  }
+
+  /** JSII1005: a setter whose value type differs from the getter's type. */
+  private _verifySeparateWriteType(psym: any, getterDecl: any, property: any, opt: { optional?: boolean }): void {
+    const { SyntaxKind } = this.ts;
+    for (const handle of psym.declarations ?? []) {
+      const setter = handle.resolve(this.project);
+      if (setter?.kind !== SyntaxKind.SetAccessor) {
+        continue;
+      }
+      const valueParam = setter.parameters?.[0];
+      if (valueParam?.type == null) {
+        continue;
+      }
+      const paramType = this.checker.getTypeFromTypeNode(valueParam.type);
+      const paramOpt: { optional?: boolean } = {};
+      const paramRef = this._typeReference(paramType, paramOpt, valueParam.type, {
+        declaration: valueParam.type,
+        purpose: 'parameter type',
+      });
+      if (!!opt.optional !== !!paramOpt.optional || JSON.stringify(property.type) !== JSON.stringify(paramRef)) {
+        this._diagnostics.push(
+          JsiiDiagnostic.JSII_1005_SEPARATE_WRITE_TYPE.create(valueParam.type).addRelatedInformation(
+            getterDecl.type ?? getterDecl.name,
+            'The getter signature is declared here',
+          ),
+        );
+      }
+    }
+  }
+
+  /** JSII1004: two enum members with the same initializer. */
+  private _verifyNoDuplicateEnumValues(decl: any): void {
+    const sf = decl.getSourceFile();
+    const enumValues = (decl.members ?? [])
+      .filter((m: any) => m.initializer)
+      .map((m: any) => ({ value: m.initializer.getText(sf), name: m.name.getText(sf), decl: this._nameNode(m) }));
+    const byValue = new Map<string, any[]>();
+    for (const v of enumValues) {
+      byValue.set(v.value, [...(byValue.get(v.value) ?? []), v]);
+    }
+    for (const [value, dups] of byValue) {
+      if (dups.length < 2) {
+        continue;
+      }
+      const err = JsiiDiagnostic.JSII_1004_DUPLICATE_ENUM_VALUE.create(dups[0].decl, value, dups.map((v) => v.name));
+      for (const dup of dups.slice(1)) {
+        err.addRelatedInformation(dup.decl, 'The conflicting declaration is here');
+      }
+      this._diagnostics.push(err);
+    }
+  }
+
+  /** JSII5011: a type named like a submodule of the same namespace. */
+  private _verifySubmoduleNameConflicts(jsiiType: any, decl: any): void {
+    const typeFqnPrefix = jsiiType.fqn.slice(0, jsiiType.fqn.length - jsiiType.name.length - 1);
+    for (const [submoduleFqn, exportSym] of this.submoduleSymbols) {
+      if (typeFqnPrefix !== submoduleFqn.slice(0, submoduleFqn.lastIndexOf('.'))) {
+        continue;
+      }
+      const name = exportSym.name;
+      const candidates = Array.from(new Set([name, camel(name), pascal(name), snake(name)]));
+      if (candidates.some((candidate) => candidate === jsiiType.name)) {
+        this._diagnostics.push(
+          JsiiDiagnostic.JSII_5011_SUBMODULE_NAME_CONFLICT.create(
+            this._nameNode(decl),
+            name,
+            jsiiType.name,
+            candidates,
+          ).addRelatedInformationIf(this._nameOrDeclarationNode(exportSym), 'This is the conflicting submodule declaration'),
+        );
+      }
+    }
+  }
+
+  /**
+   * The checks that need the complete type model: struct rules, inheritance of
+   * structs, redeclared interface members, static/instance conflicts, the kind
+   * of base types, keyword-argument conflicts, and uses of stripped types.
+   */
+  private _validateTypes(): void {
+    const dereference = createTypeResolver({ name: this.assemblyName, types: this.types } as unknown as spec.Assembly, [
+      ...this.options.projectInfo.dependencyClosure,
+      ...this.externalAssemblies.values(),
+    ]);
+    const { ast } = this.ts;
+    const memberNames = (type: any): string[] => [...(type.methods ?? []), ...(type.properties ?? [])].map((m: any) => m.name);
+    const typeMembers = (type: any): Record<string, any> =>
+      Object.fromEntries([...(type.methods ?? []), ...(type.properties ?? [])].map((m: any) => [m.name, m]));
+
+    for (const type of Object.values(this.types) as any[]) {
+      const decl = bindings.getRelatedNode(type);
+      if (type.kind === 'interface') {
+        const hintsStruct = this._hintTag(decl, 'struct') != null;
+        if ((type.methods ?? []).length > 0 && hintsStruct) {
+          const diag = JsiiDiagnostic.JSII_7001_ILLEGAL_HINT.create(
+            this._hintTag(decl, 'struct'),
+            'struct',
+            'interfaces with only readonly properties',
+          ).addRelatedInformationIf(this._nameNode(decl), 'The annotated declartion is here');
+          for (const method of type.methods) {
+            const node = bindings.getRelatedNode(method);
+            if (node) {
+              diag.addRelatedInformation(this._nameNode(node), 'A method is declared here');
+            }
+          }
+          this._diagnostics.push(diag);
+        }
+        const interfaceName = isInterfaceName(type.name);
+        if (!type.datatype && !interfaceName) {
+          this._diagnostics.push(JsiiDiagnostic.JSII_8007_BEHAVIORAL_INTERFACE_NAME.create(this._nameNode(decl), type.name));
+        }
+        const expectedName = interfaceName ? `I${pascal(type.name.slice(1))}` : pascal(type.name);
+        if (expectedName !== type.name) {
+          this._diagnostics.push(JsiiDiagnostic.JSII_8000_PASCAL_CASED_TYPE_NAMES.create(decl?.name, type.name, expectedName));
+        }
+        if (type.datatype) {
+          for (const prop of type.properties ?? []) {
+            if (!prop.immutable) {
+              this._diagnostics.push(
+                JsiiDiagnostic.JSII_3008_STRUCT_PROPS_MUST_BE_READONLY.create(
+                  this._nameNode(bindings.getRelatedNode(prop)),
+                  prop.name,
+                  type,
+                ),
+              );
+            }
+          }
+        }
+        const names = memberNames(type);
+        for (const baseFqn of type.interfaces ?? []) {
+          const base = dereference(baseFqn) as any;
+          if (base == null) {
+            continue;
+          }
+          if (base.kind !== 'interface') {
+            this._diagnostics.push(JsiiDiagnostic.JSII_3005_TYPE_USED_AS_INTERFACE.create(decl, { fqn: baseFqn }));
+            continue;
+          }
+          if (base.datatype && !type.datatype) {
+            this._diagnostics.push(JsiiDiagnostic.JSII_3007_ILLEGAL_STRUCT_EXTENSION.create(decl, type, base));
+          }
+          const baseMembers = this._allMemberNames(base, dereference);
+          for (const memberName of names) {
+            if (baseMembers.includes(memberName)) {
+              this._diagnostics.push(JsiiDiagnostic.JSII_5015_REDECLARED_INTERFACE_MEMBER.create(decl, memberName, type));
+            }
+          }
+        }
+      } else if (type.kind === 'class') {
+        if (type.base) {
+          const base = dereference(type.base) as any;
+          if (base != null && base.kind !== 'class') {
+            const baseDecl = this._heritageTypeNode(decl, 'extends');
+            this._diagnostics.push(JsiiDiagnostic.JSII_3006_TYPE_USED_AS_CLASS.create(baseDecl ?? decl, { fqn: type.base }));
+          }
+        }
+        for (const ifaceFqn of type.interfaces ?? []) {
+          const iface = dereference(ifaceFqn) as any;
+          if (iface == null) {
+            continue;
+          }
+          if (iface.kind !== 'interface') {
+            this._diagnostics.push(JsiiDiagnostic.JSII_3005_TYPE_USED_AS_INTERFACE.create(decl, { fqn: ifaceFqn }));
+          } else if (iface.datatype) {
+            this._diagnostics.push(JsiiDiagnostic.JSII_3007_ILLEGAL_STRUCT_EXTENSION.create(decl, type, iface));
+          }
+        }
+        // static / instance members of the same name (JSII5013), also across the base chain (JSII5014)
+        const statics = new Set(Object.values(typeMembers(type)).filter((m: any) => m.static).map((m: any) => m.name));
+        const nonStatics = new Set(Object.values(typeMembers(type)).filter((m: any) => !m.static).map((m: any) => m.name));
+        for (const member of statics) {
+          if (nonStatics.has(member)) {
+            this._diagnostics.push(JsiiDiagnostic.JSII_5013_STATIC_INSTANCE_CONFLICT.create(decl, member, type));
+          }
+        }
+        const classMembers = typeMembers(type);
+        for (let base = type.base ? (dereference(type.base) as any) : undefined; base != null; base = base.base ? dereference(base.base) : undefined) {
+          for (const [name, baseMember] of Object.entries(typeMembers(base)) as Array<[string, any]>) {
+            const member = classMembers[name];
+            if (member && !!baseMember.static !== !!member.static) {
+              this._diagnostics.push(
+                JsiiDiagnostic.JSII_5014_INHERITED_STATIC_CONFLICT.create(decl, member, type, baseMember, base),
+              );
+            }
+          }
+        }
+      }
+      // keyword-argument lifting: positional parameter names must not collide with the struct's properties (JSII5017)
+      for (const callable of type.methods ?? []) {
+        const params: any[] = callable.parameters ?? [];
+        const last = params[params.length - 1];
+        if (last == null || !last.type?.fqn || last.variadic) {
+          continue;
+        }
+        const struct = dereference(last.type.fqn) as any;
+        if (struct?.kind !== 'interface' || !struct.datatype) {
+          continue;
+        }
+        const propNames = new Set(this._allPropertyNames(struct, dereference));
+        for (const param of params.slice(0, -1)) {
+          if (propNames.has(param.name)) {
+            this._diagnostics.push(
+              JsiiDiagnostic.JSII_5017_POSITIONAL_KEYWORD_CONFLICT.create(bindings.getRelatedNode(callable) ?? decl, param.name),
+            );
+          }
+        }
+      }
+      void ast;
+    }
+    this._verifyNoUseOfStrippedTypes();
+  }
+
+  private _allMemberNames(iface: any, dereference: (fqn: string) => spec.Type | undefined): string[] {
+    const result = [...(iface.methods ?? []), ...(iface.properties ?? [])].map((m: any) => m.name);
+    for (const baseFqn of iface.interfaces ?? []) {
+      const base = dereference(baseFqn);
+      if (base) {
+        result.push(...this._allMemberNames(base, dereference));
+      }
+    }
+    return result;
+  }
+
+  private _allPropertyNames(iface: any, dereference: (fqn: string) => spec.Type | undefined): string[] {
+    const result = (iface.properties ?? []).map((p: any) => p.name);
+    for (const baseFqn of iface.interfaces ?? []) {
+      const base = dereference(baseFqn);
+      if (base) {
+        result.push(...this._allPropertyNames(base, dereference));
+      }
+    }
+    return result;
+  }
+
+  /** The `@<hint>` JSDoc tag node of a declaration, if any. */
+  private _hintTag(decl: any, hint: string): any {
+    if (decl == null) {
+      return undefined;
+    }
+    return this.ts.ast.getAllJSDocTags(decl, (tag: any) => tag.tagName?.text === hint)[0];
+  }
+
+  /** The first type node of the `extends`/`implements` clause of a class/interface declaration. */
+  private _heritageTypeNode(decl: any, clause: 'extends' | 'implements'): any {
+    const { SyntaxKind } = this.ts;
+    const token = clause === 'extends' ? SyntaxKind.ExtendsKeyword : SyntaxKind.ImplementsKeyword;
+    return decl?.heritageClauses?.find((hc: any) => hc.token === token)?.types?.[0];
+  }
+
+  /** JSII3999: a remaining reference to a type removed by --strip-deprecated. */
+  private _verifyNoUseOfStrippedTypes(): void {
+    if (this.strippedFqns.size === 0) {
+      return;
+    }
+    const references = (ref: any): string[] => {
+      if (ref == null) {
+        return [];
+      }
+      if (ref.fqn) {
+        return [ref.fqn];
+      }
+      if (ref.collection) {
+        return references(ref.collection.elementtype);
+      }
+      if (ref.union) {
+        return ref.union.types.flatMap(references);
+      }
+      if (ref.intersection) {
+        return ref.intersection.types.flatMap(references);
+      }
+      return [];
+    };
+    const report = (what: string, ref: any, node: any) => {
+      for (const fqn of references(ref)) {
+        if (this.strippedFqns.has(fqn)) {
+          this._diagnostics.push(
+            JsiiDiagnostic.JSII_3999_INCOHERENT_TYPE_MODEL.create(
+              node,
+              `${what} has @deprecated type ${fqn}, and it is erased by --strip-deprecated.`,
+            ),
+          );
+        }
+      }
+    };
+    for (const type of Object.values(this.types) as any[]) {
+      for (const prop of type.properties ?? []) {
+        report('Property', prop.type, bindings.getRelatedNode(prop));
+      }
+      for (const method of [...(type.methods ?? []), ...(type.initializer ? [type.initializer] : [])]) {
+        report('Method', method.returns?.type, bindings.getRelatedNode(method));
+        for (const param of method.parameters ?? []) {
+          report('Parameter', param.type, bindings.getRelatedNode(param));
+        }
+      }
+    }
+  }
+
   private _locationOf(decl: any): spec.SourceLocation {
     const sf = decl.getSourceFile();
     const { line } = sf.getLineAndCharacterOfPosition(decl.getStart(sf));
@@ -2464,6 +3072,25 @@ export class Assembler {
     return assembly as spec.Assembly;
   }
 }
+
+/** Where a type reference is used, for the wording and placement of its diagnostics. */
+interface TypeUse {
+  /** The node to attach diagnostics about the type to (the type annotation, or the declaration's name). */
+  readonly declaration?: any;
+  readonly purpose?:
+    | 'base class'
+    | 'base interface'
+    | 'list element type'
+    | 'map element type'
+    | 'parameter type'
+    | 'property type'
+    | 'return type';
+  /** Whether the type was written as `this`. */
+  readonly isThisType?: boolean;
+}
+
+/** Member names that conflict with synthetic declarations in some target languages. */
+const PROHIBITED_MEMBER_NAMES = ['build', 'equals', 'hashcode'];
 
 /** Port of the classic Assembler's `noEmptyDict`. */
 function noEmptyDict<T extends Record<string, unknown>>(xs: T): T | undefined {

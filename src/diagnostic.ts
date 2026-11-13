@@ -82,43 +82,110 @@ function categoryColor(category: DiagnosticCategory): (s: string) => string {
  */
 export function formatDiagnosticWithColorAndContext(diagnostic: Diagnostic, projectRoot: string): string {
   const color = categoryColor(diagnostic.category);
+  const text = sourceText(diagnostic.file, diagnostic.start);
   let out = '';
-  let text = diagnostic.file?.text;
-  if (text == null && diagnostic.file?.fileName && diagnostic.start != null) {
-    try {
-      text = fs.readFileSync(diagnostic.file.fileName, 'utf8');
-    } catch {
-      text = undefined;
-    }
-  }
   if (diagnostic.file) {
-    const relative = path.relative(projectRoot, diagnostic.file.fileName) || diagnostic.file.fileName;
-    out += chalk.cyan(relative);
-    if (text != null && diagnostic.start != null) {
-      const { line, character } = getLineAndCharacterOfPosition(text, diagnostic.start);
-      out += `:${chalk.yellow(line + 1)}:${chalk.yellow(character + 1)}`;
-    }
+    out += formatLocation(diagnostic.file, text, diagnostic.start, projectRoot);
     out += ' - ';
   }
   out += `${color(categoryName(diagnostic.category))}${chalk.grey(` TS${diagnostic.code}: `)}${
     diagnostic.messageText
-  }\n`;
-
+  }`;
   if (diagnostic.file && text != null && diagnostic.start != null) {
-    const start = getLineAndCharacterOfPosition(text, diagnostic.start);
-    const end = getLineAndCharacterOfPosition(text, diagnostic.start + Math.max(diagnostic.length ?? 1, 1));
-    const lines = text.split(/\r?\n/);
-    const gutterWidth = String(end.line + 1).length;
     out += '\n';
-    for (let i = start.line; i <= end.line && i < lines.length; i++) {
-      const lineText = lines[i];
-      out += `${chalk.black.bgWhite(String(i + 1).padStart(gutterWidth))} ${lineText}\n`;
-      const from = i === start.line ? start.character : 0;
-      const to = i === end.line ? Math.max(end.character, from + 1) : lineText.length;
-      out += `${chalk.black.bgWhite(' '.repeat(gutterWidth))} ${' '.repeat(from)}${color(
-        '~'.repeat(Math.max(to - from, 1)),
-      )}\n`;
+    out += formatCodeSpan(text, diagnostic.start, diagnostic.length ?? 0, '', color);
+  }
+  // Like the TypeScript formatter, a diagnostic that carries a (possibly empty)
+  // list of related information gets an extra line after its code span.
+  const related = (diagnostic as { relatedInformation?: readonly Diagnostic[] }).relatedInformation;
+  if (related) {
+    out += '\n';
+    for (const info of related) {
+      const infoText = sourceText(info.file, info.start);
+      if (info.file) {
+        out += '\n';
+        out += `  ${formatLocation(info.file, infoText, info.start, projectRoot)}`;
+        if (infoText != null && info.start != null) {
+          out += formatCodeSpan(infoText, info.start, info.length ?? 0, '    ', chalk.cyan);
+        }
+      }
+      out += '\n';
+      out += `    ${info.messageText}`;
     }
   }
+  out += '\n';
   return out;
+}
+
+function sourceText(file: DiagnosticSourceFile | undefined, start: number | undefined): string | undefined {
+  if (file?.text != null) {
+    return file.text;
+  }
+  if (file?.fileName && start != null) {
+    try {
+      return fs.readFileSync(file.fileName, 'utf8');
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function formatLocation(
+  file: DiagnosticSourceFile,
+  text: string | undefined,
+  start: number | undefined,
+  projectRoot: string,
+): string {
+  const relative = path.relative(projectRoot, file.fileName) || file.fileName;
+  let out = chalk.cyan(relative);
+  if (text != null && start != null) {
+    const { line, character } = getLineAndCharacterOfPosition(text, start);
+    out += `:${chalk.yellow(line + 1)}:${chalk.yellow(character + 1)}`;
+  }
+  return out;
+}
+
+/** Port of the TypeScript formatter's `formatCodeSpan`. */
+function formatCodeSpan(
+  text: string,
+  start: number,
+  length: number,
+  indent: string,
+  squiggleColor: (s: string) => string,
+): string {
+  const ellipsis = '...';
+  const gutter = (s: string) => chalk.black.bgWhite(s);
+  const { line: firstLine, character: firstLineChar } = getLineAndCharacterOfPosition(text, start);
+  const { line: lastLine, character: lastLineChar } = getLineAndCharacterOfPosition(text, start + length);
+  const lines = text.split('\n');
+  const hasMoreThanFiveLines = lastLine - firstLine >= 4;
+  let gutterWidth = String(lastLine + 1).length;
+  if (hasMoreThanFiveLines) {
+    gutterWidth = Math.max(ellipsis.length, gutterWidth);
+  }
+  let context = '';
+  for (let i = firstLine; i <= lastLine; i++) {
+    context += '\n';
+    if (hasMoreThanFiveLines && firstLine + 1 < i && i < lastLine - 1) {
+      context += `${indent}${gutter(ellipsis.padStart(gutterWidth))} \n`;
+      i = lastLine - 1;
+    }
+    const lineContent = (lines[i] ?? '').replace(/\r$/, '').replace(/\s+$/g, '').replace(/\t/g, ' ');
+    context += `${indent}${gutter(String(i + 1).padStart(gutterWidth))} ${lineContent}\n`;
+    context += `${indent}${gutter(''.padStart(gutterWidth))} `;
+    let squiggle: string;
+    if (i === firstLine) {
+      const lastCharForLine = i === lastLine ? lastLineChar : undefined;
+      squiggle =
+        lineContent.slice(0, firstLineChar).replace(/\S/g, ' ') +
+        lineContent.slice(firstLineChar, lastCharForLine).replace(/./g, '~');
+    } else if (i === lastLine) {
+      squiggle = lineContent.slice(0, lastLineChar).replace(/./g, '~');
+    } else {
+      squiggle = lineContent.replace(/./g, '~');
+    }
+    context += squiggleColor(squiggle);
+  }
+  return context;
 }

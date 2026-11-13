@@ -197,9 +197,37 @@ export class Code<T extends DiagnosticMessageFormatter = DiagnosticMessageFormat
    * @param location the source code location attachment of the message.
    * @param args     the arguments to the message formatter.
    */
-  public create(location: DiagnosticLocation | undefined, ...args: Parameters<T>): JsiiDiagnostic {
+  public create(location: DiagnosticLocation | AstNode | undefined, ...args: Parameters<T>): JsiiDiagnostic {
     return new JsiiDiagnostic(this, this.#formatter(...args), location);
   }
+}
+
+/**
+ * The parts of a (client-side) TypeScript AST node a diagnostic can be attached
+ * to. Any node of the `#typescript/ast` module satisfies this.
+ */
+export interface AstNode {
+  readonly parent?: AstNode;
+  getSourceFile(): { readonly fileName: string; readonly text: string };
+  getStart(sourceFile?: unknown): number;
+  getWidth(sourceFile?: unknown): number;
+}
+
+function isAstNode(x: unknown): x is AstNode {
+  return x != null && typeof (x as any).getSourceFile === 'function' && typeof (x as any).getStart === 'function';
+}
+
+/**
+ * The source range a node covers (its start without leading trivia, like
+ * `ts.Node#getStart()`), as a diagnostic location.
+ */
+export function locationOfNode(node: AstNode): DiagnosticLocation {
+  const sf = node.getSourceFile();
+  return {
+    file: { fileName: sf.fileName, text: sf.text },
+    start: node.getStart(sf),
+    length: node.getWidth(sf),
+  };
 }
 
 /**
@@ -872,6 +900,14 @@ export class JsiiDiagnostic implements Diagnostic {
 
   public readonly relatedInformation = new Array<JsiiDiagnostic>();
 
+  /**
+   * The AST node this diagnostic was created from, when it was created from one
+   * (used to find enclosing `@jsii suppress` directives).
+   *
+   * @internal
+   */
+  public readonly node: AstNode | undefined;
+
   // eslint-disable-next-line @typescript-eslint/explicit-member-accessibility
   #formatted?: string;
 
@@ -880,11 +916,15 @@ export class JsiiDiagnostic implements Diagnostic {
    *
    * @internal
    */
-  public constructor(code: Code, messageText: string, location?: DiagnosticLocation) {
+  public constructor(code: Code, messageText: string, location?: DiagnosticLocation | AstNode) {
     this.category = code.category;
     this.jsiiCode = code.code;
     this.messageText = messageText;
 
+    if (isAstNode(location)) {
+      this.node = location;
+      location = locationOfNode(location);
+    }
     if (location != null) {
       this.file = location.file;
       this.start = location.start;
@@ -892,9 +932,10 @@ export class JsiiDiagnostic implements Diagnostic {
     }
   }
 
-  public addRelatedInformation(location: DiagnosticLocation, message: JsiiDiagnostic['messageText']): this {
+  public addRelatedInformation(location: DiagnosticLocation | AstNode, message: JsiiDiagnostic['messageText']): this {
+    const fileName = isAstNode(location) ? location.getSourceFile().fileName : location.file.fileName;
     // Don't relate info into the TypeScript standard library
-    if (!/[\\/]typescript[\\/]lib[\\/]lib\..+\.d\.ts$/.test(location.file.fileName)) {
+    if (!/[\\/](typescript|@typescript[\\/][^\\/]+)[\\/]lib[\\/]lib\..+\.d\.ts$/.test(fileName)) {
       this.relatedInformation.push(JsiiDiagnostic.JSII_9999_RELATED_INFO.create(location, message));
     }
     // Clearing out #formatted, as this would no longer be the correct string.
@@ -911,7 +952,10 @@ export class JsiiDiagnostic implements Diagnostic {
    *
    * @returns `this`
    */
-  public addRelatedInformationIf(node: DiagnosticLocation | undefined, message: JsiiDiagnostic['messageText']): this {
+  public addRelatedInformationIf(
+    node: DiagnosticLocation | AstNode | undefined,
+    message: JsiiDiagnostic['messageText'],
+  ): this {
     if (node != null) {
       return this.addRelatedInformation(node, message);
     } else {
@@ -929,7 +973,7 @@ export class JsiiDiagnostic implements Diagnostic {
    * @returns `this`
    */
   public maybeAddRelatedInformation(
-    node: DiagnosticLocation | undefined,
+    node: DiagnosticLocation | AstNode | undefined,
     message: JsiiDiagnostic['messageText'],
   ): this {
     if (node == null) {

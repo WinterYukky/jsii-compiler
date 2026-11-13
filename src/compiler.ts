@@ -20,6 +20,7 @@ import { parseTsconfigJson, readTypeScriptConfigFile } from './tsconfig/read';
 import { TypeScriptConfigValidator } from './tsconfig/tsconfig-validator';
 import { ValidationError } from './tsconfig/validator';
 import * as utils from './utils';
+import { Validator } from './validator';
 
 const LOG = log4js.getLogger('jsii/compiler');
 export const DIAGNOSTICS = 'diagnostics';
@@ -491,8 +492,24 @@ export function buildProject(options: BuildProjectOptions): BuildProjectResult {
         ],
       };
     }
-    const jsiiDiagnostics = assembler.diagnostics;
+    const jsiiDiagnostics = [...assembler.diagnostics];
     if (jsiiDiagnostics.some((d) => d.category === DiagnosticCategory.Error)) {
+      return {
+        typeCount: 0,
+        emittedFiles: [],
+        emitSkipped: true,
+        diagnostics: [...tsDiagnostics, ...jsiiDiagnostics],
+      };
+    }
+
+    // Validate the assembly (the checks that work on the assembly itself: naming
+    // rules, inheritance contracts, references to hidden types, ...).
+    const validation = new Validator(projectInfo, assembly).emit();
+    jsiiDiagnostics.push(...validation.diagnostics);
+    if (validation.usedFeatures?.length) {
+      assembly.usedFeatures = Array.from(new Set([...(assembly.usedFeatures ?? []), ...validation.usedFeatures])).sort();
+    }
+    if (validation.emitSkipped) {
       return {
         typeCount: 0,
         emittedFiles: [],
