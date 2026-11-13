@@ -1,7 +1,7 @@
 # Draft PR body — aws/jsii-compiler: port the jsii validation diagnostics to the TypeScript 7 compiler
 
 > Paste-ready body for the PR from `WinterYukky/jsii-compiler:feat/ts7-validator-1794493579` to `aws/jsii-compiler:preview/v7.1`.
-> Head at the time of writing: `a5d00f0` (8 commits on top of `preview/v7.1` at `5f49f41`). Reference other PRs by URL, not by number. Paragraphs are single lines for clean GitHub rendering.
+> Head at the time of writing: `d72808d` (9 commits on top of `preview/v7.1` at `5f49f41`). Reference other PRs by URL, not by number. Paragraphs are single lines for clean GitHub rendering.
 > Suggested title: `feat: jsii validation diagnostics on the TypeScript 7 compiler`
 
 ---
@@ -40,10 +40,10 @@ Measured on aws-cdk-lib built from source (aws/aws-cdk `main` at `42913b76`, 23,
 
 | | `preview/v7.1` (no validation) | this branch | validation cost |
 |---|---|---|---|
-| wall clock | 64.1 s | 75.1 s | +11.0 s (+17 %) |
-| CPU | 108.4 s | 118.0 s | +9.6 s (+9 %) |
+| wall clock | 61.3 s | 66.6 s | +5.3 s (+9 %) |
+| CPU | 98.9 s | 103.6 s | +4.7 s (+5 %) |
 
-The run-to-run spread of this branch was 69.8–77.2 s. The cost is mostly checker round-trips: 963,194 requests against 916,130 (+47,064, +5 %). The port started at +72,363 requests; the last commit removed 25,000 of them (heritage symbols resolved once per clause and reused by the supertype check, literal enum initializers decided without the checker, the submodule-name check indexed by namespace). Of the remaining increase, 28,800 `getTypeAtLocation` requests come from the member walk looking up the declaring type before deciding whether a member is hidden (the `@internal`/`_` naming rules need the declaring type); deciding hidden-ness first and looking the declaring type up only when a naming diagnostic is possible would remove them. 34,700 extra `getTypeFromTypeNode` requests are not attributed yet. Both are left as follow-ups; the small packages (`constructs`, the `jsii-calc` fixtures) compile in well under a second of server time either way.
+The validation itself makes fewer checker requests than the compiler made before it: 806,381 against 917,910 (-111,529, -12 %). The port initially added 72,000 requests; three commits brought the total under the baseline by resolving each heritage clause symbol once and reusing it for the supertype check, deciding literal enum initializers without the checker, skipping the getter/setter write-type comparison when both annotations have the same text, and, the largest item, looking a member's declaring type up once per declaration and only when the `@internal`/`_` naming rules can apply (`getTypeAtLocation` 196,996 → 104,319). What remains of the cost is round-trip latency (the server spends about the same time; the client-side wait grew by 5.5 s) plus the spec-level validation passes in JavaScript, which are a few hundred milliseconds each. The small packages (`constructs`, the `jsii-calc` fixtures) compile in well under a second of server time either way.
 
 ## Also fixed
 
@@ -56,4 +56,3 @@ Two differences from the classic compiler that showed up while comparing diagnos
 
 - `--add-deprecation-warnings` (the deprecation-warnings emit transform) and the removal of `--strip-deprecated` members from the emitted `.js`/`.d.ts`: separate follow-ups, tracked by the remaining `@TODO(ts7)` skips.
 - Watch mode.
-- The request reductions described under "Numbers".
