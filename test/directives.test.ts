@@ -2,19 +2,16 @@ import * as ts from 'typescript';
 import { sourceToAssemblyHelper } from '../lib';
 import { JsiiDiagnostic } from '../src';
 import { compileJsiiForErrors } from './compiler-helpers';
+import { Directives } from '../src/directives';
 import { formatDiagnostic, stripAnsi } from '../src/utils';
 
-// @TODO(ts7): the `Directives` parser (src/directives.ts) worked on the in-process TypeScript AST, which the
-// TypeScript 7 compiler does not hold. `@jsii ignore` is recognized by the assembler from the JSDoc tags the
-// TypeScript 7 API returns (tested below); the parser-level tests and the directive diagnostics
-// (JSII2000/JSII2999, `@jsii suppress`) are kept here for the port of the validation diagnostics.
-// The module is loaded lazily so that this file type-checks and runs while the parser does not exist.
-function directivesOf(node: ts.Node, onDiagnostic: (diag: JsiiDiagnostic) => void): any {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return require('../src/directives').Directives.of(node, onDiagnostic);
+// The parser works on the JSDoc data of a declaration node (`jsDoc`, tag names and comments), which the
+// TypeScript 5 and TypeScript 7 ASTs share; the parser-level tests below use TypeScript 5 source files.
+function directivesOf(node: ts.Node, onDiagnostic: (diag: JsiiDiagnostic) => void): Directives {
+  return Directives.of(node as any, onDiagnostic);
 }
 
-test.skip('non-directive tags', () => {
+test('non-directive tags', () => {
   // Given
   const sourceFile = ts.createSourceFile(
     'test.ts',
@@ -34,7 +31,7 @@ test.skip('non-directive tags', () => {
   expect(directives.ignore).toBeFalsy();
 });
 
-describe.skip('@internal', () => {
+describe('@internal', () => {
   test('set on declaration', () => {
     // Given
     const sourceFile = ts.createSourceFile(
@@ -75,7 +72,7 @@ describe.skip('@internal', () => {
   });
 });
 
-describe.skip('@jsii', () => {
+describe('@jsii', () => {
   test('without content', () => {
     // Given
     const sourceFile = ts.createSourceFile(
@@ -320,8 +317,7 @@ describe.skip('@jsii', () => {
 });
 
 describe('@jsii ignore', () => {
-  // @TODO(ts7): expects a jsii validation diagnostic (JSII3004); re-enable with the port of the validator
-  test.skip('without an ignore directive, extending a mapped type emits JSII3004', () => {
+  test('without an ignore directive, extending a mapped type emits JSII3004', () => {
     const errors = compileJsiiForErrors(`
       export interface Base {
         readonly foo: string;
@@ -413,8 +409,7 @@ describe('@jsii ignore', () => {
     expect(names).not.toContain('hidden');
   });
 
-  // @TODO(ts7): expects a jsii validation diagnostic (JSII3xxx); re-enable with the port of the validator
-  test.skip('an ignored type is effectively private and cannot be exposed on the public API', () => {
+  test('an ignored type is effectively private and cannot be exposed on the public API', () => {
     const errors = compileJsiiForErrors(`
       /** @jsii ignore */
       export interface Hidden {

@@ -382,7 +382,8 @@ function _defaultValidations(): ValidationFunction[] {
         diagnostic(
           JsiiDiagnostic.JSII_5002_OVERRIDE_CHANGES_VISIBILITY.create(
             actualNode?.modifiers?.find(
-              (mod: any) => mod.kind === tsApi().SyntaxKind.PublicKeyword || mod.kind === tsApi().SyntaxKind.ProtectedKeyword,
+              (mod: any) =>
+                mod.kind === tsApi().SyntaxKind.PublicKeyword || mod.kind === tsApi().SyntaxKind.ProtectedKeyword,
             ) ?? declarationName(actualNode),
             label,
             action,
@@ -390,7 +391,8 @@ function _defaultValidations(): ValidationFunction[] {
             expVisibility,
           ).maybeAddRelatedInformation(
             expectedNode?.modifiers?.find(
-              (mod: any) => mod.kind === tsApi().SyntaxKind.PublicKeyword || mod.kind === tsApi().SyntaxKind.ProtectedKeyword,
+              (mod: any) =>
+                mod.kind === tsApi().SyntaxKind.PublicKeyword || mod.kind === tsApi().SyntaxKind.ProtectedKeyword,
             ) ?? declarationName(expectedNode),
             'The implemented declaration is here.',
           ),
@@ -510,7 +512,8 @@ function _defaultValidations(): ValidationFunction[] {
         diagnostic(
           JsiiDiagnostic.JSII_5002_OVERRIDE_CHANGES_VISIBILITY.create(
             actualNode?.modifiers?.find(
-              (mod: any) => mod.kind === tsApi().SyntaxKind.PublicKeyword || mod.kind === tsApi().SyntaxKind.ProtectedKeyword,
+              (mod: any) =>
+                mod.kind === tsApi().SyntaxKind.PublicKeyword || mod.kind === tsApi().SyntaxKind.ProtectedKeyword,
             ) ?? declarationName(actualNode),
             label,
             action,
@@ -518,7 +521,8 @@ function _defaultValidations(): ValidationFunction[] {
             expVisibility,
           ).maybeAddRelatedInformation(
             expectedNode?.modifiers?.find(
-              (mod: any) => mod.kind === tsApi().SyntaxKind.PublicKeyword || mod.kind === tsApi().SyntaxKind.ProtectedKeyword,
+              (mod: any) =>
+                mod.kind === tsApi().SyntaxKind.PublicKeyword || mod.kind === tsApi().SyntaxKind.ProtectedKeyword,
             ) ?? declarationName(expectedNode),
             'The implemented declaration is here.',
           ),

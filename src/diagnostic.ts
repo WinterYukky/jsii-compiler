@@ -88,9 +88,7 @@ export function formatDiagnosticWithColorAndContext(diagnostic: Diagnostic, proj
     out += formatLocation(diagnostic.file, text, diagnostic.start, projectRoot);
     out += ' - ';
   }
-  out += `${color(categoryName(diagnostic.category))}${chalk.grey(` TS${diagnostic.code}: `)}${
-    diagnostic.messageText
-  }`;
+  out += `${color(categoryName(diagnostic.category))}${chalk.grey(` TS${diagnostic.code}: `)}${diagnostic.messageText}`;
   if (diagnostic.file && text != null && diagnostic.start != null) {
     out += '\n';
     out += formatCodeSpan(text, diagnostic.start, diagnostic.length ?? 0, '', color);
@@ -137,7 +135,9 @@ function formatLocation(
   start: number | undefined,
   projectRoot: string,
 ): string {
-  const relative = path.relative(projectRoot, file.fileName) || file.fileName;
+  const relative = path.isAbsolute(file.fileName)
+    ? path.relative(projectRoot, file.fileName) || file.fileName
+    : file.fileName;
   let out = chalk.cyan(relative);
   if (text != null && start != null) {
     const { line, character } = getLineAndCharacterOfPosition(text, start);

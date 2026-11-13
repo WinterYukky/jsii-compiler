@@ -21,6 +21,7 @@ import { TypeScriptConfigValidator } from './tsconfig/tsconfig-validator';
 import { ValidationError } from './tsconfig/validator';
 import * as utils from './utils';
 import { Validator } from './validator';
+import { isSilenced } from './warnings';
 
 const LOG = log4js.getLogger('jsii/compiler');
 export const DIAGNOSTICS = 'diagnostics';
@@ -156,7 +157,7 @@ export class Compiler {
     }
 
     const diagnostics = sortAndDeduplicateDiagnostics(result.diagnostics);
-    const hasWarnings = diagnostics.some((d) => d.category === DiagnosticCategory.Warning);
+    const hasWarnings = diagnostics.some((d) => d.category === DiagnosticCategory.Warning && !isSilenced(d));
     return {
       emitSkipped: result.emitSkipped || (this.options.failOnWarnings === true && hasWarnings),
       diagnostics,
@@ -455,12 +456,10 @@ export function buildProject(options: BuildProjectOptions): BuildProjectResult {
   const entry = deriveEntry(projectRoot, projectInfo, tscRootDir, tscOutDir);
 
   try {
-    // Surface TypeScript compilation errors BEFORE assembling, with the same
-    // reject-on-error behaviour as the default backend: a program that does not
-    // compile must not produce an assembly.
-    if (tsDiagnostics.some((d) => d.category === DiagnosticCategory.Error)) {
-      return { typeCount: 0, emittedFiles: [], emitSkipped: true, diagnostics: tsDiagnostics };
-    }
+    // Like the classic compiler, the type model is still analyzed (and its
+    // diagnostics reported) when the program has TypeScript errors, but a
+    // program that does not compile must not produce an assembly.
+    const tsHasErrors = tsDiagnostics.some((d) => d.category === DiagnosticCategory.Error);
 
     const assembler = new Assembler(host.ts, project, {
       packageJson: projectInfo.packageJson,
@@ -511,9 +510,11 @@ export function buildProject(options: BuildProjectOptions): BuildProjectResult {
     const validation = new Validator(projectInfo, assembly).emit();
     jsiiDiagnostics.push(...validation.diagnostics);
     if (validation.usedFeatures?.length) {
-      assembly.usedFeatures = Array.from(new Set([...(assembly.usedFeatures ?? []), ...validation.usedFeatures])).sort();
+      assembly.usedFeatures = Array.from(
+        new Set([...(assembly.usedFeatures ?? []), ...validation.usedFeatures]),
+      ).sort();
     }
-    if (validation.emitSkipped || jsiiDiagnostics.some((d) => d.category === DiagnosticCategory.Error)) {
+    if (tsHasErrors || validation.emitSkipped || jsiiDiagnostics.some((d) => d.category === DiagnosticCategory.Error)) {
       return {
         typeCount: 0,
         emittedFiles: [],

@@ -123,7 +123,9 @@ function getComments(tag: JsDocTag): Comment[] {
   return tag.comment.flatMap((jsdocNode): Comment[] => {
     // `{@link Name text}` parts carry a name; plain text parts do not.
     const text = (
-      jsdocNode.name != null ? `${jsdocNode.name.getText(jsdocNode.name.getSourceFile())}: ${jsdocNode.text}` : jsdocNode.text
+      jsdocNode.name != null
+        ? `${jsdocNode.name.getText(jsdocNode.name.getSourceFile())}: ${jsdocNode.text}`
+        : jsdocNode.text
     ).trim();
     return text ? [{ text, jsdocNode }] : [];
   });
