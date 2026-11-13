@@ -1575,3 +1575,89 @@ Notes:
 Artifacts: `s3://alphaface-compile-transfer-tmp/lege-tsgo-poc/perf3c/<box>/` (`time-*.txt`,
 `perf-summary.txt`, `jsii-classic-1.json`, `jsii-ts7-1.json`), script `ec2-perf-3c.sh` and the
 cgroup re-measurement `cg.sh` next to it.
+
+## Phase 5G — spin-poll on small hosts: fixed, burstable, 2 vCPU (closed)
+
+Question (raised on the upstream PR): on a small machine, does the spin-poll
+still buy wall clock, or does it only burn CPU? 5D/5E answered it with
+`taskset` on a 16 vCPU box and with Graviton; what was missing is the small
+instances themselves: shared vCPUs, lower clocks, burstable credits. Also
+needed: a basis for an "off below N cores" default.
+
+Setup: fork build `ea37992` (the PR branch at review time), aws-cdk-lib fixture,
+three modes (spin off / fixed 100 µs / adaptive = the PR default), two runs per
+cell, every cell on its own instance of the type named, Ubuntu 24.04, Node 24.
+Wall is the jsii compile; CPU seconds are node + tsgo from `/proc/<pid>/stat`
+(by pid, so the two processes are separated correctly); steal % from
+`/proc/stat` over the run. Burstable cells were run twice: with credits
+available (`unlimited`) and with credits exhausted (`standard`, after a
+10–20 min busy loop on every vCPU; the hypervisor then clamps the box to its
+baseline, which shows up as steal time). `.jsii` output is byte-identical
+across all 48 runs and the request count is 698,297 in every run.
+
+Hosts with 4 GB (c7i.large, t3.medium, c7g.large) cannot run the fixture at
+all: the tsgo server peaks at 3.4 GB RSS and the Node client at 1.4 GB, so
+every run died with an EOF on the channel after 9 GB of swap-in, in all three
+modes alike. A fallback to `aws/constructs` (400 requests, 150 ms of transport
+in a 2 s compile) is below the resolution of the question and is recorded as a
+null result only; `jsii-calc` could not be used because its `@scope/jsii-calc-lib`
+dependency fails to compile on TS7 (`TS5011`, unrelated to this work). The
+2 vCPU cells were therefore measured on 8 GB hosts (m7i.large, t3.large,
+m7g.large).
+
+| host | vCPU (physical cores) | kind | spin off | 100 µs | adaptive | Δwall (adaptive − off) | ΔCPU-s (node + tsgo) | s saved per CPU-s | steal % (off → adaptive) |
+|---|---|---|---|---|---|---|---|---|---|
+| c7i.4xlarge | 16 vCPU (8 cores) | x86, fixed | 43.4 / 44.4 | 35.9 / 35.5 | 36.1 / 35.7 | **-8.0 s** | +10 (69 → 79) | 0.79 | 0 → 0 |
+| c7i.xlarge | 4 vCPU (2 cores) | x86, fixed | 47.1 / 46.0 | 41.3 / 42.1 | 41.0 / 41.5 | **-5.2 s** | +11 (74 → 85) | 0.46 | 0 → 0 |
+| t3.xlarge | 4 vCPU (2 cores) | x86, burstable, credits available | 106.8 / 111.2 | 75.4 / 75.5 | 77.5 / 76.3 | **-32.1 s** | +3 (159 → 162) | 10.24 | 0 → 0 |
+| t3.xlarge | 4 vCPU (2 cores) | x86, burstable, credits exhausted | 118.6 / 115.7 | 107.1 / 102.3 | 107.3 / 107.6 | **-9.7 s** | +74 (168 → 242) | 0.13 | 0 → 19 |
+| m7i.large | 2 vCPU (1 core) | x86, fixed | 62.5 / 62.1 | 66.8 / 67.3 | 68.0 / 66.9 | **+5.1 s** | +29 (86 → 115) | -0.17 | 0 → 0 |
+| t3.large | 2 vCPU (1 core) | x86, burstable, credits available | 116.7 / 117.4 | 118.4 / 118.5 | 118.2 / 117.6 | **+0.9 s** | +57 (148 → 205) | -0.02 | 0 → 0 |
+| t3.large | 2 vCPU (1 core) | x86, burstable, credits exhausted | 280.6 / 265.4 | 357.2 / 348.8 | 354.2 / 352.9 | **+80.5 s** | +151 (355 → 506) | -0.53 | 45 → 50 |
+| m7g.large | 2 vCPU (2 cores) | Graviton, fixed | 70.7 / 69.7 | 65.5 / 64.5 | 65.5 / 64.3 | **-5.3 s** | +17 (89 → 107) | 0.31 | 0 → 0 |
+
+Reading:
+
+- The boundary is **physical cores, not vCPUs and not burstability**. On x86
+  a 2 vCPU instance is one physical core (an SMT pair): the client and the
+  server already share that core, and whichever side spins takes issue slots
+  from the other instead of from an idle core. There the spin loses (m7i.large
+  +5.1 s, +34 % CPU) or does nothing (t3.large with credits, +0.9 s, +39 %
+  CPU). The adaptive mode does not rescue this case and was not designed to:
+  the replies still arrive within a millisecond, so it keeps spinning; it
+  detects a quiet peer, not a contended core.
+- A 2 vCPU Graviton instance is two physical cores, and the spin wins there
+  (m7g.large −5.3 s, −7.5 %), consistent with 5E.
+- Every 4 vCPU cell (two cores) wins, including the burstable ones. With
+  credits available the t3.xlarge gain is large (−32 s, −29 %) for almost no
+  extra CPU: on a slow host the pipe wake-up is a bigger share of the round
+  trip. With credits exhausted it still wins (−9.7 s) but now pays for it
+  (+74 CPU-s, 19 % steal), i.e. it spends credits.
+- A credit-exhausted single-core box is the one bad case: +80 s (+30 %), with
+  steal at 45–50 % in every mode. The spin burns the clamped CPU budget that
+  the checker needed.
+- Seconds of wall saved per CPU second spent: 0.79 on 16 vCPU, 0.46 on 4 vCPU,
+  0.31 on Graviton 2 cores, 0.13 on a credit-exhausted 4 vCPU, negative on
+  every single-core host.
+- This also explains 5D: `taskset -c 0,1` on a c7i.xlarge still had two
+  physical cores (on Nitro, vCPU n and n+cores are the siblings), which is why
+  it showed a gain where a real single-core instance shows a loss (inference,
+  not verified against the host topology).
+
+Default proposal: enable the spin only when `os.availableParallelism() >= 4`
+on the client and `runtime.NumCPU() >= 4` on the server, with an explicit
+`TSGO_SYNC_SPIN_US` always taking precedence. Rationale: the data separates on
+"at least two physical cores available to the pair", and neither Node nor Go
+exposes a physical-core count portably; logical CPUs are what both can read,
+and both processes on the same host read the same value, so the two ends agree
+without talking. The threshold of 4 is the smallest logical count that
+guarantees two physical cores on SMT hosts. It costs the 2-core Graviton case
+its −5 s (a 7 % gain foregone on a host where the spin is harmless), and in
+exchange it avoids the +8 % loss on every x86 1-core host and the +30 % loss on
+a throttled one; losing nothing on the small end is worth more to a default
+than winning on it. A cgroup CPU quota is not visible through either call, but
+5F showed the quota case still winning at 16 vCPU, so no further guard is
+needed there.
+
+Raw logs archived off-repo (`ts7-5f-small-<cell>-20261113.tar.gz` per cell;
+the 4 GB null runs as `ts7-5g-small-<cell>-20261113.tar.gz`).
